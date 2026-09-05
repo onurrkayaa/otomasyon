@@ -85,3 +85,32 @@ class AnthropicTransport:
                 ) or 0,
             ),
         )
+
+
+class OfflineTransport:
+    """Ağa çıkmadan sabit yanıt döndürür.
+
+    Test iskelesi değildir: API anahtarı olmadan yerel geliştirme, kaos
+    testleri ve M5'teki gölge modunun temelidir. Kullanım maliyeti sıfırdır
+    ve muhasebe yolu yine de çalışır (usage alanları doldurulur).
+    """
+
+    def __init__(self, text: str = "offline-yanit"):
+        self._text = text
+
+    def send(
+        self,
+        *,
+        model: str,
+        effort: str,
+        system_layer1: str,
+        system_layer2: str,
+        user_content: str,
+        max_tokens: int,
+    ) -> RawResponse:
+        return RawResponse(
+            text=self._text,
+            model=model,
+            stop_reason="end_turn",
+            usage=Usage(input_tokens=10, output_tokens=5),
+        )

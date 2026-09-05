@@ -83,3 +83,12 @@ class AlwaysFailsTool(Tool):
 
     def compensate(self, payload: dict, response: dict) -> None:
         return None
+
+
+def register_tools() -> None:
+    """runner.load_tool_modules() bu fonksiyonu çağırır."""
+    from kernel.tools import registry
+
+    registry.register(SlowWriterTool())
+    registry.register(NoReconcileTool())
+    registry.register(AlwaysFailsTool())
