@@ -5,6 +5,7 @@ artırmak. Çökme kurtarması = kirası dolan işi başkasının alması.
 """
 from __future__ import annotations
 
+import contextlib
 import importlib
 import os
 import signal
@@ -99,8 +100,10 @@ def main() -> None:
     finally:
         # Havuzu burada açıkça kapat: aksi halde temizlik __del__'e kalır ve
         # yorumlayıcı kapanışı sırasında psycopg_pool işçi thread'lerini
-        # durduramayıp SIGTERM sonrası çıkışı ~20sn geciktirir.
-        db.reset_pool()
+        # durduramayıp SIGTERM sonrası çıkışı ~20sn geciktirir. reset_pool()
+        # kendisi patlarsa run_forever'ın asıl istisnasını maskelemesin.
+        with contextlib.suppress(Exception):
+            db.reset_pool()
 
 
 if __name__ == "__main__":

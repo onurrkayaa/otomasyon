@@ -106,6 +106,7 @@ def _run_crash_scenario(tmp_path: Path, kill_point: str, key: str) -> uuid.UUID:
     finally:
         if victim.poll() is None:
             victim.kill()
+            victim.wait(timeout=10)
 
     assert victim.returncode == -signal.SIGKILL
 
@@ -116,7 +117,12 @@ def _run_crash_scenario(tmp_path: Path, kill_point: str, key: str) -> uuid.UUID:
         _wait_for_status(run_id, "completed")
     finally:
         rescuer.terminate()
-        rescuer.wait(timeout=10)
+        try:
+            rescuer.wait(timeout=10)
+        finally:
+            if rescuer.poll() is None:
+                rescuer.kill()
+                rescuer.wait(timeout=10)
 
     return run_id
 
@@ -147,11 +153,31 @@ def test_crash_after_write_does_not_duplicate_side_effect(tmp_path):
 @pytest.mark.slow
 @pytest.mark.timeout(180)
 def test_crashed_attempt_is_visible_in_audit_trail(tmp_path):
-    """Çökmüş deneme denetim izinde görünür kalmalı (Kural 5)."""
+    """Çökmüş denemenin steps satırı denetim izinde kalıcı olarak durur.
+
+    (Not: bu Kural 5 değildir — Kural 5 `events` tablosunun ekleme-yalnız
+    olmasıdır ve `steps`'te öyle bir kısıt yok. Burada doğrulanan,
+    yürütücünün çökmüş denemeyi ASLA güncellemediği ve kurtarmanın YENİ,
+    daha büyük attempt'li bir satır açtığıdır — sadece "2+ satır var"
+    değil, kurbanın satırının 'running' durumunda gerçekten hâlâ orada
+    olduğu.)
+    """
     run_id = _run_crash_scenario(tmp_path, "after_write", "crash-audit")
     with db.tx() as conn:
-        attempts = conn.execute(
-            "SELECT count(*) FROM steps WHERE run_id = %s AND node_id = 'kaydet'",
+        rows = conn.execute(
+            "SELECT attempt, status FROM steps"
+            " WHERE run_id = %s AND node_id = 'kaydet' ORDER BY attempt",
             (run_id,),
-        ).fetchone()[0]
-    assert attempts >= 2, "çökmüş deneme ve kurtarma denemesi ayrı satırlar olmalı"
+        ).fetchall()
+    assert len(rows) >= 2, "çökmüş deneme ve kurtarma denemesi ayrı satırlar olmalı"
+    victim_attempt, victim_status = rows[0]
+    rescue_attempt, rescue_status = rows[-1]
+    assert victim_status == "running", (
+        "kurbanın steps satırı hâlâ 'running' durumunda durmuş olmalı"
+        f" (temizlenmemiş/güncellenmemiş); bulundu: {victim_status!r}"
+    )
+    assert rescue_attempt > victim_attempt, (
+        "kurtarma denemesi kurbanınkinden BÜYÜK bir attempt taşımalı"
+        " (kurbanın satırının üzerine yazılmadığının kanıtı)"
+    )
+    assert rescue_status == "completed", "kurtarma denemesi tamamlanmış olmalı"
