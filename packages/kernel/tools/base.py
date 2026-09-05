@@ -40,7 +40,13 @@ class Tool(ABC):
 
     @abstractmethod
     def execute(self, payload: dict) -> dict:
-        """Yan etkiyi uygular. Hata durumunda istisna fırlatır."""
+        """Yan etkiyi uygular. Hata durumunda istisna fırlatır.
+
+        İstisna fırlatan bir araç, yan etkinin OLUŞMADIĞINI garanti etmek
+        ZORUNDADIR. Bunu garanti edemeyen bir araç (ör. ağ zaman aşımından
+        sonra dış sistemin yazmayı yine de almış olabileceği durumlar) ya
+        `external_idempotency` bayrağını set etmeli ya da belirsizliği
+        `reconcile()` ile kendi içinde ele almalıdır."""
 
     @abstractmethod
     def compensate(self, payload: dict, response: dict) -> None:

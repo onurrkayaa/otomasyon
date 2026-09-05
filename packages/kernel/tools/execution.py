@@ -59,19 +59,32 @@ def _call_and_complete(tool: Tool, key: str, payload: dict) -> ToolResult:
     try:
         response = tool.execute(payload)
     except Exception as exc:  # noqa: BLE001 — her dış hata kaydedilir
-        _mark(key, "failed", {"error": str(exc)})
+        if not _mark(key, "failed", {"error": str(exc)}):
+            return _ownership_lost()
         return ToolResult(outcome=ToolOutcome.FAILED, error=str(exc))
-    _mark(key, "completed", response)
+    if not _mark(key, "completed", response):
+        return _ownership_lost()
     return ToolResult(outcome=ToolOutcome.COMPLETED, response=response)
 
 
-def _mark(key: str, status: str, response: dict) -> None:
+def _mark(key: str, status: str, response: dict) -> bool:
+    """True = satır güncellendi. False = sahiplik kaybedilmiş (satır artık
+    'reserved' değil — başka bir worker kirası dolmuş rezervasyonu devralıp
+    farklı bir duruma taşımış). Böyle bir satır asla ezilmez (Bulgu 1)."""
     with db.independent_tx() as conn:
-        conn.execute(
+        cur = conn.execute(
             "UPDATE tool_calls SET status = %s, response = %s, completed_at = now()"
-            " WHERE idempotency_key = %s",
+            " WHERE idempotency_key = %s AND status = 'reserved'",
             (status, Jsonb(response), key),
         )
+        return cur.rowcount > 0
+
+
+def _ownership_lost() -> ToolResult:
+    return ToolResult(
+        outcome=ToolOutcome.UNCERTAIN,
+        error="sahiplik kaybedildi: satır artık 'reserved' değil, işaretleme uygulanmadı",
+    )
 
 
 # --- Anahtar zaten alınmışsa --------------------------------------------------
@@ -150,14 +163,16 @@ def _recover_expired(
     if tool.supports_reconcile:
         found = tool.reconcile(payload)
         if found is not None:
-            _mark(key, "completed", found)
+            if not _mark(key, "completed", found):
+                return _ownership_lost()
             return ToolResult(outcome=ToolOutcome.COMPLETED, response=found)
         return _call_and_complete(tool, key, payload)
 
     if tool.external_idempotency:
         return _call_and_complete(tool, key, payload)
 
-    _mark(key, "uncertain", {"reason": "kira doldu, doğrulama yolu yok"})
+    if not _mark(key, "uncertain", {"reason": "kira doldu, doğrulama yolu yok"}):
+        return _ownership_lost()
     return ToolResult(
         outcome=ToolOutcome.UNCERTAIN,
         error="kira doldu ve reconcile/external_idempotency yok; kör tekrar yapılmadı",

@@ -55,9 +55,14 @@ class SlowWriterTool(Tool):
         if os.environ.get("OTOMASYON_KILL_POINT") != point:
             return
         marker = os.environ.get("OTOMASYON_KILL_MARKER")
-        if marker:
-            Path(marker).write_text(point, encoding="utf-8")
-        time.sleep(30)
+        if not marker:
+            raise RuntimeError(
+                "OTOMASYON_KILL_POINT ayarlı ama OTOMASYON_KILL_MARKER tanımsız;"
+                " kill -9 testi marker dosyası olmadan bekleyemez"
+            )
+        Path(marker).write_text(point, encoding="utf-8")
+        while True:
+            time.sleep(1)
 
 
 class NoReconcileTool(SlowWriterTool):
