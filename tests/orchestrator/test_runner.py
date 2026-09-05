@@ -196,3 +196,99 @@ def test_lost_lease_cancels_the_advance():
             "SELECT node_id FROM job_queue WHERE run_id = %s", (run_id,)
         ).fetchall()
     assert jobs == [("kaydet",)]
+
+
+def test_run_failed_event_carries_no_raw_error_text(monkeypatch):
+    """Ö2: silinemeyen olay kaydına ham istisna metni yazılmaz (Kural 5)."""
+    from kernel.orchestrator import flow
+    from tests.fakes import AlwaysFailsTool
+
+    secret = "sizan-sir-" + "x" * 500
+
+    class LeakyTool(AlwaysFailsTool):
+        name = "test.leaky"
+
+        def execute(self, payload: dict) -> dict:
+            raise RuntimeError(secret)
+
+    registry.register(LeakyTool())
+    monkeypatch.setitem(
+        flow.M1_FLOW, "kaydet", flow.Node(id="kaydet", type="tool", tool="test.leaky")
+    )
+
+    run_id = runner.start_run("t1", {"text": "x", "key": "k7"})
+    _drain()
+
+    with db.tx() as conn:
+        failed = [e for e in events.read(conn, run_id) if e.type == "run_failed"]
+        errors = conn.execute(
+            "SELECT error FROM steps WHERE run_id = %s AND node_id = 'kaydet'",
+            (run_id,),
+        ).fetchall()
+
+    assert len(failed) == 1
+    payload = failed[0].payload
+    assert "error" not in payload, "ham metin olay kaydında olmamalı"
+    assert payload["error_class"]
+    assert len(payload["error_summary"]) == 200, "özet 200 karaktere kırpılmalı"
+    assert secret not in payload["error_summary"]
+    assert secret in errors[0][0], "ham metin steps.error'da kalmalı (temizlenebilir)"
+
+
+def test_max_steps_stops_the_run():
+    """Ö3: adım tavanına ulaşan run ikinci adıma geçemez."""
+    run_id = runner.start_run("t1", {"text": "x", "key": "k8"})
+    with db.tx() as conn:
+        conn.execute("UPDATE runs SET max_steps = 1 WHERE id = %s", (run_id,))
+
+    _drain()
+
+    with db.tx() as conn:
+        status = conn.execute(
+            "SELECT status FROM runs WHERE id = %s", (run_id,)
+        ).fetchone()[0]
+        left = conn.execute(
+            "SELECT count(*) FROM job_queue WHERE run_id = %s", (run_id,)
+        ).fetchone()[0]
+        nodes = conn.execute(
+            "SELECT node_id FROM steps WHERE run_id = %s", (run_id,)
+        ).fetchall()
+        failed = [e for e in events.read(conn, run_id) if e.type == "run_failed"]
+
+    assert status == "failed"
+    assert left == 0, "tavana ulaşan run kuyrukta iş bırakmamalı"
+    assert nodes == [("ozetle",)], "ikinci düğüm için steps satırı açılmamalı"
+    assert failed and failed[0].payload["error_class"] == "MaxStepsExceeded"
+
+
+def test_deferral_counts_against_max_steps():
+    """Ö3: DEFERRED dalı da tavana sayılır — kaçak erteleme döngüsü olamaz."""
+    import uuid as _uuid
+
+    run_id = runner.start_run("t1", {"text": "x", "key": "k9"})
+    gw = Gateway(OfflineTransport())
+    runner.run_once("w1", gw)  # ozetle tamamlanır (step_count = 1)
+
+    # Başka bir worker'ın elindeki, kirası GEÇERLİ rezervasyon → DEFERRED.
+    with db.tx() as conn:
+        step_id = _uuid.uuid4()
+        conn.execute(
+            "INSERT INTO steps (id, run_id, node_id, attempt, status)"
+            " VALUES (%s, %s, 'kaydet', 0, 'running')",
+            (step_id, run_id),
+        )
+        conn.execute(
+            "INSERT INTO tool_calls (id, step_id, tool_name, idempotency_key,"
+            " request, status, lease_expires_at) VALUES"
+            " (%s, %s, 'test.slow_writer', %s, '{}'::jsonb, 'reserved',"
+            "  now() + interval '600 seconds')",
+            (_uuid.uuid4(), step_id, f"{run_id}:k9"),
+        )
+
+    runner.run_once("w1", gw)  # kaydet ertelenir
+
+    with db.tx() as conn:
+        step_count = conn.execute(
+            "SELECT step_count FROM runs WHERE id = %s", (run_id,)
+        ).fetchone()[0]
+    assert step_count == 2, "erteleme adım bütçesinden düşmeli"

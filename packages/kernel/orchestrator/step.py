@@ -45,8 +45,23 @@ def execute_step(job: queue.Job, gateway: Gateway) -> str:
 
     with db.tx() as conn:
         run = conn.execute(
-            "SELECT input, tenant_id FROM runs WHERE id = %s", (job.run_id,)
+            "SELECT input, tenant_id, step_count, max_steps FROM runs"
+            " WHERE id = %s",
+            (job.run_id,),
         ).fetchone()
+
+    # Kaçak döngü koruması: max_steps yazılıp okunmazsa hiçbir şeydir.
+    # DEFERRED dalı da step_count'u artırır, yani süresiz erteleme de buraya çarpar.
+    if run[2] >= run[3]:
+        return _fail_run(
+            job,
+            None,
+            "failed",
+            "MaxStepsExceeded",
+            f"adım tavanı aşıldı: step_count={run[2]}, max_steps={run[3]}",
+        )
+
+    with db.tx() as conn:
         conn.execute(
             "INSERT INTO steps (id, run_id, node_id, attempt, status, input)"
             " VALUES (%s, %s, %s, %s, 'running', %s)",
@@ -86,9 +101,11 @@ def _run_llm_task(
     try:
         response = gateway.complete(request, job.run_id, step_id)
     except BudgetExceeded as exc:
-        return _fail_run(job, step_id, "budget_exceeded", str(exc))
+        return _fail_run(
+            job, step_id, "budget_exceeded", type(exc).__name__, str(exc)
+        )
     except RefusalError as exc:
-        return _fail_run(job, step_id, "failed", str(exc))
+        return _fail_run(job, step_id, "failed", type(exc).__name__, str(exc))
 
     _finish_step(job, step_id, {"ozet": response.text})
     return _advance(job, node)
@@ -117,6 +134,11 @@ def _run_tool(
                 " error = 'ertelendi' WHERE id = %s",
                 (step_id,),
             )
+            conn.execute(
+                "UPDATE runs SET step_count = step_count + 1, updated_at = now()"
+                " WHERE id = %s",
+                (job.run_id,),
+            )
             queue.release(
                 conn, job.id, job.worker_id, result.retry_after_seconds
             )
@@ -126,9 +148,13 @@ def _run_tool(
         return "deferred"
 
     if result.outcome is ToolOutcome.UNCERTAIN:
-        return _fail_run(job, step_id, "uncertain", result.error or "belirsiz")
+        return _fail_run(
+            job, step_id, "uncertain", "ToolUncertain", result.error or "belirsiz"
+        )
 
-    return _fail_run(job, step_id, "failed", result.error or "araç hatası")
+    return _fail_run(
+        job, step_id, "failed", "ToolFailed", result.error or "araç hatası"
+    )
 
 
 # --- ortak ---
@@ -169,21 +195,32 @@ def _advance(job: queue.Job, node: flow.Node) -> str:
         return "advanced"
 
 
-def _fail_run(job: queue.Job, step_id: UUID, run_status: str, error: str) -> str:
+def _fail_run(
+    job: queue.Job,
+    step_id: UUID | None,
+    run_status: str,
+    error_class: str,
+    error: str,
+) -> str:
+    """step_id None ise henüz bir steps satırı açılmamıştır (adım tavanı)."""
     with db.tx() as conn:
         # Sahiplik önce (bkz. _advance): kira kaybedilmişse run durumunu yazma.
         if not queue.complete(conn, job.id, job.worker_id):
             return "lease_lost"
-        conn.execute(
-            "UPDATE steps SET status = 'failed', error = %s, ended_at = now()"
-            " WHERE id = %s",
-            (error, step_id),
-        )
+        if step_id is not None:
+            conn.execute(
+                "UPDATE steps SET status = 'failed', error = %s, ended_at = now()"
+                " WHERE id = %s",
+                (error, step_id),
+            )
         conn.execute(
             "UPDATE runs SET status = %s, updated_at = now() WHERE id = %s",
             (run_status, job.run_id),
         )
         events.append(
-            conn, job.run_id, "run_" + run_status, {"error": error}
+            conn,
+            job.run_id,
+            "run_" + run_status,
+            error_payload(error_class, error),
         )
     return "run_" + run_status
