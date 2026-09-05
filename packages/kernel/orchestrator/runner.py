@@ -93,8 +93,14 @@ def main() -> None:
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
     load_tool_modules()
-    run_forever(os.environ.get("OTOMASYON_WORKER_ID", str(uuid.uuid4())),
-                build_gateway())
+    try:
+        run_forever(os.environ.get("OTOMASYON_WORKER_ID", str(uuid.uuid4())),
+                    build_gateway())
+    finally:
+        # Havuzu burada açıkça kapat: aksi halde temizlik __del__'e kalır ve
+        # yorumlayıcı kapanışı sırasında psycopg_pool işçi thread'lerini
+        # durduramayıp SIGTERM sonrası çıkışı ~20sn geciktirir.
+        db.reset_pool()
 
 
 if __name__ == "__main__":
