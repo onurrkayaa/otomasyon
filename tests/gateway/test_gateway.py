@@ -19,10 +19,12 @@ class FakeTransport:
         return self.response
 
 
-def _raw(stop_reason: str = "end_turn") -> RawResponse:
+def _raw(
+    stop_reason: str = "end_turn", model: str = "claude-opus-5"
+) -> RawResponse:
     return RawResponse(
         text="özet",
-        model="claude-opus-5",
+        model=model,
         stop_reason=stop_reason,
         usage=Usage(
             input_tokens=1000,
@@ -64,6 +66,43 @@ def test_cost_uses_separate_cache_read_rate():
     usage = Usage(input_tokens=1000, output_tokens=200, cache_read_input_tokens=4000)
     # 1000*5 + 200*25 + 4000*0.50 = 5000 + 5000 + 2000 = 12000 / 1e6
     assert accounting.cost("claude-opus-5", usage) == Decimal("0.012000")
+
+
+def test_cost_normalizes_dated_model_id():
+    """K3: API takma adı çözülmüş tarihli kimlik döndürür; fiyat önekten bulunur."""
+    usage = Usage(input_tokens=1000, output_tokens=200, cache_read_input_tokens=4000)
+    assert accounting.cost("claude-opus-5-20260115", usage) == Decimal("0.012000")
+
+
+def test_unknown_model_does_not_kill_the_call():
+    """K3: fiyatı bilinmeyen model → istisna YOK, sessizlik de YOK."""
+    run_id, step_id = _make_run_and_step()
+    gw = Gateway(FakeTransport(_raw(model="bilinmeyen-model-9")))
+
+    resp = gw.complete(
+        LLMRequest(
+            tier="fast", system_layer1="a", system_layer2="b", user_content="c"
+        ),
+        run_id,
+        step_id,
+    )
+
+    assert resp.text == "özet"
+    assert resp.cost_usd == Decimal(0)
+
+    with db.tx() as conn:
+        spent = conn.execute(
+            "SELECT spent_usd FROM runs WHERE id = %s", (run_id,)
+        ).fetchone()[0]
+        recorded = events.read(conn, run_id)
+
+    assert spent == Decimal(0), "bilinmeyen fiyatta uydurma maliyet yazılmamalı"
+    unknown = [e for e in recorded if e.type == "llm_call_pricing_unknown"]
+    assert len(unknown) == 1
+    assert unknown[0].payload["model"] == "bilinmeyen-model-9"
+    assert unknown[0].payload["step_id"] == str(step_id)
+    assert unknown[0].payload["stop_reason"] == "end_turn"
+    assert "llm_call_completed" in [e.type for e in recorded]
 
 
 def test_complete_records_usage_cost_and_event():

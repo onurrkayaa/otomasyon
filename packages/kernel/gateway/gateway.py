@@ -47,8 +47,9 @@ class Gateway:
             max_tokens=req.max_tokens,
         )
 
+        priced = accounting.price_for(raw.model) is not None
         cost = accounting.cost(raw.model, raw.usage)
-        self._record(raw, cost, run_id, step_id)
+        self._record(raw, cost, run_id, step_id, priced)
 
         if raw.stop_reason == "refusal":
             raise RefusalError(
@@ -86,7 +87,9 @@ class Gateway:
                 f"tahmini maliyet bütçeyi aşıyor (harcanan={spent}, bütçe={budget})"
             )
 
-    def _record(self, raw, cost: Decimal, run_id: UUID, step_id: UUID) -> None:
+    def _record(
+        self, raw, cost: Decimal, run_id: UUID, step_id: UUID, priced: bool
+    ) -> None:
         with db.tx() as conn:
             conn.execute(
                 "UPDATE steps SET model = %s, tokens_in = %s, tokens_out = %s,"
@@ -105,6 +108,19 @@ class Gateway:
                 " WHERE id = %s",
                 (cost, run_id),
             )
+            if not priced:
+                # Maliyet 0 yazıldı; bu satır muhasebenin eksik olduğunun
+                # denetlenebilir kaydıdır (K3).
+                events.append(
+                    conn,
+                    run_id,
+                    "llm_call_pricing_unknown",
+                    {
+                        "step_id": str(step_id),
+                        "model": raw.model,
+                        "stop_reason": raw.stop_reason,
+                    },
+                )
             events.append(
                 conn,
                 run_id,

@@ -27,10 +27,30 @@ PRICES: dict[str, Price] = {
 }
 
 
+def price_for(model: str) -> Price | None:
+    """Yanıtın bildirdiği model kimliği için fiyat. Bulunamazsa None.
+
+    Arama önek normalizasyonuyla yapılır: API takma adı çözülmüş tarihli bir
+    kimlik döndürür (claude-opus-5-20260115 → claude-opus-5). En uzun eşleşen
+    önek kazanır.
+    """
+    matches = [k for k in PRICES if model.startswith(k)]
+    if not matches:
+        return None
+    return PRICES[max(matches, key=len)]
+
+
 def cost(model: str, usage: Usage) -> Decimal:
-    if model not in PRICES:
-        raise KeyError(f"fiyatı bilinmeyen model: {model}")
-    p = PRICES[model]
+    """Bilinmeyen model → Decimal(0). Bilinçli takas: sunucu tarafı geri düşüş
+    (§6.5) yanıt modelinin farklı olmasını NORMAL kılar; burada istisna atmak
+    maliyeti, olayı ve yanıtı birlikte kaybettirir ve worker'ı öldürür.
+    Maliyeti bilmemek, muhasebenin sessizce kaybolmasından iyidir — ama sessiz
+    olmaması gerekir: çağıran `price_for(...) is None` ile durumu ayırt eder
+    ve o çağrı için bütçe zorlanamaz.
+    """
+    p = price_for(model)
+    if p is None:
+        return Decimal(0)
     total = (
         p.inp * usage.input_tokens
         + p.out * usage.output_tokens
