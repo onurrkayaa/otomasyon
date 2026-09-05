@@ -161,7 +161,15 @@ def _recover_expired(
         )
 
     if tool.supports_reconcile:
-        found = tool.reconcile(payload)
+        try:
+            found = tool.reconcile(payload)
+        except Exception as exc:  # noqa: BLE001 — her dış hata kaydedilir
+            # Doğrulama yolu ÇALIŞMADI: yazmanın olup olmadığı hâlâ bilinmiyor.
+            # Kör tekrar yapılmaz, satır insan kuyruğuna alınır.
+            reason = f"reconcile patladı: {type(exc).__name__}"
+            if not _mark(key, "uncertain", {"reason": reason}):
+                return _ownership_lost()
+            return ToolResult(outcome=ToolOutcome.UNCERTAIN, error=f"{reason}: {exc}")
         if found is not None:
             if not _mark(key, "completed", found):
                 return _ownership_lost()

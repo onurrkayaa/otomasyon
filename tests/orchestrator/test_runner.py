@@ -91,3 +91,67 @@ def test_uncertain_tool_stops_the_run():
         assert effects == 0
     finally:
         flow.M1_FLOW["kaydet"].tool = original
+
+
+def test_step_exception_does_not_escape_run_once(monkeypatch):
+    """K1: uygulama istisnası worker'ı öldürmemeli, iş kuyruğa geri dönmeli."""
+    from kernel.orchestrator import flow
+
+    monkeypatch.setitem(
+        flow.M1_FLOW,
+        "kaydet",
+        flow.Node(id="kaydet", type="tool", tool="kayitli.olmayan.arac"),
+    )
+    run_id = runner.start_run("t1", {"text": "x", "key": "k4"})
+    gw = Gateway(OfflineTransport())
+
+    assert runner.run_once("w1", gw) is True, "ozetle adımı"
+    assert runner.run_once("w1", gw) is True, "patlayan adım istisna sızdırmamalı"
+
+    with db.tx() as conn:
+        jobs = conn.execute(
+            "SELECT locked_by, available_at > now() FROM job_queue WHERE run_id = %s",
+            (run_id,),
+        ).fetchall()
+        status = conn.execute(
+            "SELECT status FROM runs WHERE id = %s", (run_id,)
+        ).fetchone()[0]
+
+    assert len(jobs) == 1, "iş kuyrukta kalmalı"
+    assert jobs[0][0] is None, "kilit bırakılmalı"
+    assert jobs[0][1] is True, "geri çekilme gecikmesi uygulanmalı"
+    assert status == "running", "tavan aşılmadan run sonlandırılmamalı"
+
+
+def test_run_is_dead_lettered_after_max_attempts(monkeypatch):
+    """K1: tavana ulaşan iş kuyruktan çıkar, run 'uncertain' olur."""
+    from kernel import config
+    from kernel.orchestrator import flow
+
+    monkeypatch.setitem(
+        flow.M1_FLOW,
+        "kaydet",
+        flow.Node(id="kaydet", type="tool", tool="kayitli.olmayan.arac"),
+    )
+    monkeypatch.setattr(config, "MAX_JOB_ATTEMPTS", 1)
+
+    run_id = runner.start_run("t1", {"text": "x", "key": "k5"})
+    gw = Gateway(OfflineTransport())
+    runner.run_once("w1", gw)
+    runner.run_once("w1", gw)
+
+    with db.tx() as conn:
+        left = conn.execute(
+            "SELECT count(*) FROM job_queue WHERE run_id = %s", (run_id,)
+        ).fetchone()[0]
+        status = conn.execute(
+            "SELECT status FROM runs WHERE id = %s", (run_id,)
+        ).fetchone()[0]
+        recorded = events.read(conn, run_id)
+
+    assert left == 0, "ölü mektup işi kuyrukta bırakmamalı"
+    assert status == "uncertain"
+    uncertain = [e for e in recorded if e.type == "run_uncertain"]
+    assert len(uncertain) == 1
+    assert uncertain[0].payload["error_class"] == "KeyError"
+    assert "error" not in uncertain[0].payload, "ham metin olay kaydına yazılmamalı"

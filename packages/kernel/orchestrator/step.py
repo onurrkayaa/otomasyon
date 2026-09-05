@@ -19,6 +19,19 @@ from kernel.state import db, events, queue
 from kernel.tools import execution, registry
 from kernel.tools.base import ToolOutcome
 
+# Ham istisna metni SİLİNEMEYEN olay kaydına yazılmaz (Kural 5): sızan bir
+# anahtar ya da müşteri verisi bir daha temizlenemez. Olaya yalnız sınıf adı ve
+# kırpılmış özet gider; ham metin steps.error kolonunda kalır (o UPDATE edilebilir).
+ERROR_SUMMARY_LIMIT = 200
+
+
+def error_payload(error_class: str, error: str) -> dict:
+    return {
+        "error_class": error_class,
+        "error_summary": error[:ERROR_SUMMARY_LIMIT],
+    }
+
+
 # Katman 1: ürün sabiti. Bayt bayt sabit tutulur — §6.2 önbellek noktası 1.
 SYSTEM_LAYER1 = (
     "Sen kurumsal bir belge işleme otomasyonunun parçasısın. "

@@ -48,13 +48,51 @@ def start_run(tenant_id: str, payload: dict, budget_usd: str = "1.0") -> UUID:
 
 
 def run_once(worker_id: str, gateway: Gateway) -> bool:
-    """Bir iş varsa alır ve yürütür. İş yoksa False döner."""
+    """Bir iş varsa alır ve yürütür. İş yoksa False döner.
+
+    Adım yürütmesi bir istisna sınırıyla çevrilidir: worker ASLA bir uygulama
+    istisnası yüzünden ölmez. Ölen worker'ın bıraktığı iş kirası dolana kadar
+    kimseye verilmez ve aynı hata sonsuza dek tekrarlanır.
+    """
     with db.tx() as conn:
         job = queue.claim(conn, worker_id, config.JOB_LEASE_SECONDS)
     if job is None:
         return False
-    step.execute_step(job, gateway)
+    try:
+        step.execute_step(job, gateway)
+    except Exception as exc:  # noqa: BLE001 — sınırın amacı budur
+        _handle_step_exception(job, exc)
     return True
+
+
+def _backoff_seconds(attempts: int) -> int:
+    """Üstel geri çekilme, bir dakikada sınırlanır."""
+    return min(2 ** attempts, 60)
+
+
+def _handle_step_exception(job: queue.Job, exc: Exception) -> None:
+    """Tavanın altındaysa geri çekilmeyle kuyruğa koy, değilse ölü-mektup.
+
+    Ölü mektup: iş kuyruktan çıkar, run 'uncertain' olur (otomatik tekrar YOK,
+    insan incelemesi gerekir) ve olay kaydına gerekçe düşer.
+    """
+    if job.attempts < config.MAX_JOB_ATTEMPTS:
+        with db.tx() as conn:
+            queue.release(conn, job.id, _backoff_seconds(job.attempts))
+        return
+    with db.tx() as conn:
+        queue.complete(conn, job.id)
+        conn.execute(
+            "UPDATE runs SET status = 'uncertain', updated_at = now()"
+            " WHERE id = %s",
+            (job.run_id,),
+        )
+        events.append(
+            conn,
+            job.run_id,
+            "run_uncertain",
+            step.error_payload(type(exc).__name__, str(exc)),
+        )
 
 
 def run_forever(worker_id: str, gateway: Gateway) -> None:

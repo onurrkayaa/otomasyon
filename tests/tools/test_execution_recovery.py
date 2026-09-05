@@ -140,3 +140,26 @@ def test_uncertain_stays_uncertain_on_retry():
     )
     assert again.outcome is ToolOutcome.UNCERTAIN
     assert _count("g") == 0
+
+
+def test_reconcile_exception_becomes_uncertain():
+    """K1: reconcile'ın kendisi patlarsa istisna yukarı kaçmaz, sonuç 'uncertain'."""
+    run_id, step_id = _make_run_and_step()
+    key = f"{run_id}:h"
+    _orphan_reservation(step_id, key, {"key": "h"})
+
+    class ExplodingReconcile(SlowWriterTool):
+        def reconcile(self, payload: dict) -> dict | None:
+            raise ConnectionError("dış sisteme ulaşılamadı")
+
+    result = execution.execute_tool(
+        ExplodingReconcile(), run_id, step_id, {"key": "h"}
+    )
+
+    assert result.outcome is ToolOutcome.UNCERTAIN
+    assert _count("h") == 0, "reconcile patlayınca kör tekrar yapılmamalı"
+    with db.tx() as conn:
+        row = conn.execute(
+            "SELECT status FROM tool_calls WHERE idempotency_key = %s", (key,)
+        ).fetchone()
+    assert row[0] == "uncertain"
