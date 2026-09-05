@@ -8,6 +8,17 @@ TEST_DSN = os.environ.get(
     "OTOMASYON_TEST_DSN", "postgresql://localhost/otomasyon_test"
 )
 
+def require_test_database(dsn: str) -> None:
+    """Şema DROP ediliyor: yanlış DSN ile koşulan suite üretim şemasını siler."""
+    name = dsn.rsplit("/", 1)[-1].split("?")[0]
+    if "test" not in name.lower():
+        pytest.exit(
+            f"OTOMASYON_TEST_DSN bir test veritabanına işaret etmiyor: {name!r}."
+            " Suite 'DROP SCHEMA public CASCADE' çalıştırır; iptal edildi.",
+            returncode=2,
+        )
+
+
 TABLES = [
     "side_effects", "job_queue", "tool_calls",
     "events", "steps", "runs",
@@ -16,6 +27,7 @@ TABLES = [
 
 @pytest.fixture(scope="session", autouse=True)
 def _schema():
+    require_test_database(TEST_DSN)
     os.environ["OTOMASYON_DB_DSN"] = TEST_DSN
     from kernel.state import db, migrate
 

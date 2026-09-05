@@ -37,3 +37,31 @@ def test_events_table_rejects_update():
     with pytest.raises(psycopg.errors.RaiseException):
         with db.tx() as conn:
             conn.execute("UPDATE events SET type = 'degistirildi'")
+
+
+def test_migrations_serialize_on_an_advisory_lock():
+    """Küçük 3: aynı anda başlayan iki deploy'da biri CREATE TABLE ile patlar."""
+    import threading
+
+    done = threading.Event()
+    errors: list[Exception] = []
+
+    def _apply():
+        try:
+            migrate.apply_migrations()
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+        finally:
+            done.set()
+
+    thread = threading.Thread(target=_apply)
+    with db.tx() as conn:
+        conn.execute(
+            "SELECT pg_advisory_xact_lock(%s)", (migrate.MIGRATION_LOCK_ID,)
+        )
+        thread.start()
+        assert not done.wait(1.0), "göç koşucusu advisory lock'u beklemeliydi"
+
+    thread.join(timeout=10)
+    assert done.is_set()
+    assert errors == []

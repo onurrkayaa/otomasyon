@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 
@@ -17,6 +18,9 @@ import psycopg
 from psycopg_pool import ConnectionPool
 
 _pool: ConnectionPool | None = None
+# Havuz kurulumu çift kontrollü kilitle korunur: iki thread aynı anda girerse
+# iki havuz kurulur ve biri hiç kapanmaz (10 bağlantı sızar).
+_pool_lock = threading.Lock()
 
 
 def dsn() -> str:
@@ -32,16 +36,19 @@ def dsn() -> str:
 def pool() -> ConnectionPool:
     global _pool
     if _pool is None:
-        _pool = ConnectionPool(dsn(), min_size=1, max_size=10, open=True)
+        with _pool_lock:
+            if _pool is None:
+                _pool = ConnectionPool(dsn(), min_size=1, max_size=10, open=True)
     return _pool
 
 
 def reset_pool() -> None:
     """Testlerin DSN değiştirebilmesi için havuzu kapatır."""
     global _pool
-    if _pool is not None:
-        _pool.close()
-        _pool = None
+    with _pool_lock:
+        if _pool is not None:
+            _pool.close()
+            _pool = None
 
 
 @contextmanager

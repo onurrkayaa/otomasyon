@@ -14,4 +14,3 @@ POLL_INTERVAL_SECONDS = float(os.environ.get("OTOMASYON_POLL_INTERVAL", "0.5"))
 # Bir işin kaç kez alınabileceğinin tavanı. Tavana ulaşan iş ölü-mektup olur:
 # kuyruktan çıkar, run 'uncertain' işaretlenir ve insan incelemesine gider.
 MAX_JOB_ATTEMPTS = int(os.environ.get("OTOMASYON_MAX_JOB_ATTEMPTS", "5"))
-

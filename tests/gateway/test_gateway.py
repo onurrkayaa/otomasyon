@@ -197,9 +197,12 @@ def test_only_transport_module_imports_anthropic():
     root = pathlib.Path(__file__).parents[2] / "packages" / "kernel"
     py_files = list(root.rglob("*.py"))
     assert len(py_files) > 5, f"tekel testi hiçbir şey taramadı: {root}"
+    # Muafiyet TAM göreli yola verilir: kernel/** altına konan ikinci bir
+    # transport.py yalnız adıyla muafiyet kazanmamalı.
     offenders = [
-        str(p.relative_to(root))
+        p.relative_to(root).as_posix()
         for p in py_files
-        if p.name != "transport.py" and "anthropic" in p.read_text(encoding="utf-8")
+        if p.relative_to(root).as_posix() != "gateway/transport.py"
+        and "anthropic" in p.read_text(encoding="utf-8")
     ]
     assert offenders == [], f"anthropic'i doğrudan import eden modüller: {offenders}"

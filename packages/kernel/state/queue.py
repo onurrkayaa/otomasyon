@@ -54,7 +54,10 @@ def claim(
     if row is None:
         return None
     return Job(
-        id=row[0], run_id=row[1], node_id=row[2], attempts=row[3],
+        id=row[0],
+        run_id=row[1],
+        node_id=row[2],
+        attempts=row[3],
         worker_id=row[4],
     )
 

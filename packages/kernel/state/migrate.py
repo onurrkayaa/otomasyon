@@ -12,11 +12,17 @@ from kernel.state import db
 
 MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 
+# Göçler süreçler arası serileştirilir: 001_initial.sql `CREATE TABLE runs`
+# (IF NOT EXISTS yok) içerir, aynı anda başlayan iki deploy'da biri patlar.
+# Sabit ve keyfi bir bigint; transaction bitince kilit kendiliğinden düşer.
+MIGRATION_LOCK_ID = 8_242_026_090_501
+
 
 def apply_migrations() -> list[str]:
     """Uygulanmamış göçleri sırayla uygular. Uygulananların adını döner."""
     applied: list[str] = []
     with db.tx() as conn:
+        conn.execute("SELECT pg_advisory_xact_lock(%s)", (MIGRATION_LOCK_ID,))
         conn.execute(
             "CREATE TABLE IF NOT EXISTS schema_migrations ("
             " version text PRIMARY KEY,"
