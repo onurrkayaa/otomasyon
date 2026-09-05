@@ -185,9 +185,9 @@ def test_lost_lease_cancels_the_advance():
         jobs = conn.execute(
             "SELECT node_id, locked_by FROM job_queue WHERE run_id = %s", (run_id,)
         ).fetchall()
-        types = [e.type for e in events.read(conn, run_id)]
     assert jobs == [("ozetle", "wB")], "kaybeden worker sonraki düğümü kuyruğa koymamalı"
-    assert "run_completed" not in types
+    # 'run_completed' bu dalda (next="kaydet") zaten hiç yazılmaz; o iddia
+    # test_lost_lease_cancels_the_completion'da (next=None dalı) sınanıyor.
 
     # Gerçek sahip ilerletince kuyrukta yine TEK iş olur.
     assert step.execute_step(job_b, gw) == "advanced"
@@ -196,6 +196,114 @@ def test_lost_lease_cancels_the_advance():
             "SELECT node_id FROM job_queue WHERE run_id = %s", (run_id,)
         ).fetchall()
     assert jobs == [("kaydet",)]
+
+
+def test_lost_lease_cancels_the_completion():
+    """K2: kirasını kaybeden worker run'ı TAMAMLAYAMAZ. 'kaydet' düğümünde
+    next=None, yani bu _advance'in run'ı bitiren dalıdır — burada
+    'run_completed' tam bir kez yazılmalı ve kaybedenin altında yazılmamalı."""
+    from kernel.orchestrator import step
+    from kernel.state import queue
+
+    run_id = runner.start_run("t1", {"text": "x", "key": "k16"})
+    gw = Gateway(OfflineTransport())
+    assert runner.run_once("w1", gw) is True  # ozetle tamamlanır, kaydet kuyruğa girer
+
+    with db.tx() as conn:
+        job_a = queue.claim(conn, "wA", 30)
+    assert job_a is not None and job_a.node_id == "kaydet"
+    with db.tx() as conn:
+        conn.execute(
+            "UPDATE job_queue SET locked_until = now() - interval '1 second'"
+            " WHERE id = %s",
+            (job_a.id,),
+        )
+    with db.tx() as conn:
+        job_b = queue.claim(conn, "wB", 300)
+    assert job_b is not None and job_b.id == job_a.id
+
+    assert step.execute_step(job_a, gw) == "lease_lost"
+
+    with db.tx() as conn:
+        status = conn.execute(
+            "SELECT status FROM runs WHERE id = %s", (run_id,)
+        ).fetchone()[0]
+        types = [e.type for e in events.read(conn, run_id)]
+    assert "run_completed" not in types, "kaybeden worker run'ı tamamlamamalı"
+    assert status == "running", "kaybeden worker altında run 'running' kalmalı"
+
+    assert step.execute_step(job_b, gw) == "run_completed"
+
+    with db.tx() as conn:
+        status = conn.execute(
+            "SELECT status FROM runs WHERE id = %s", (run_id,)
+        ).fetchone()[0]
+        types = [e.type for e in events.read(conn, run_id)]
+    completed = [t for t in types if t == "run_completed"]
+    assert len(completed) == 1, "devralan worker run_completed'i tam bir kez yazmalı"
+    assert status == "completed"
+
+
+def test_lost_lease_cancels_the_deferred_branch():
+    """Madde 1: DEFERRED dalı da sahiplik korumalı olmalı — kirasını kaybeden
+    worker adım bütçesini tüketmemeli, 'step_deferred' yazmamalı."""
+    import uuid as _uuid
+
+    from kernel.orchestrator import step
+    from kernel.state import queue
+
+    run_id = runner.start_run("t1", {"text": "x", "key": "k14"})
+    gw = Gateway(OfflineTransport())
+    assert runner.run_once("w1", gw) is True  # ozetle tamamlanır, kaydet kuyruğa girer
+
+    # kaydet için kirası GEÇERLİ başka bir rezervasyon → DEFERRED'e zorla.
+    with db.tx() as conn:
+        held_step_id = _uuid.uuid4()
+        conn.execute(
+            "INSERT INTO steps (id, run_id, node_id, attempt, status)"
+            " VALUES (%s, %s, 'kaydet', 0, 'running')",
+            (held_step_id, run_id),
+        )
+        conn.execute(
+            "INSERT INTO tool_calls (id, step_id, tool_name, idempotency_key,"
+            " request, status, lease_expires_at) VALUES"
+            " (%s, %s, 'test.slow_writer', %s, '{}'::jsonb, 'reserved',"
+            "  now() + interval '600 seconds')",
+            (_uuid.uuid4(), held_step_id, f"{run_id}:kaydet:k14"),
+        )
+
+    with db.tx() as conn:
+        job_a = queue.claim(conn, "wA", 30)
+    assert job_a is not None and job_a.node_id == "kaydet"
+
+    # Kirayı geçmişe çekip başkasına kaptır.
+    with db.tx() as conn:
+        conn.execute(
+            "UPDATE job_queue SET locked_until = now() - interval '1 second'"
+            " WHERE id = %s",
+            (job_a.id,),
+        )
+    with db.tx() as conn:
+        job_b = queue.claim(conn, "wB", 300)
+    assert job_b is not None and job_b.id == job_a.id
+
+    with db.tx() as conn:
+        step_count_before = conn.execute(
+            "SELECT step_count FROM runs WHERE id = %s", (run_id,)
+        ).fetchone()[0]
+
+    assert step.execute_step(job_a, gw) == "lease_lost"
+
+    with db.tx() as conn:
+        step_count_after = conn.execute(
+            "SELECT step_count FROM runs WHERE id = %s", (run_id,)
+        ).fetchone()[0]
+        types = [e.type for e in events.read(conn, run_id)]
+
+    assert step_count_after == step_count_before, (
+        "kirasını kaybeden worker DEFERRED dalında adım bütçesini tüketmemeli"
+    )
+    assert "step_deferred" not in types
 
 
 def test_run_failed_event_carries_no_raw_error_text(monkeypatch):

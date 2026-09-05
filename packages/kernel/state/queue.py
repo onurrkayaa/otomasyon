@@ -11,6 +11,8 @@ from uuid import UUID
 import psycopg
 from pydantic import BaseModel
 
+from kernel import config
+
 
 class Job(BaseModel):
     id: int
@@ -33,7 +35,9 @@ def enqueue(
 
 
 def claim(
-    conn: psycopg.Connection, worker_id: str, lease_seconds: int = 30
+    conn: psycopg.Connection,
+    worker_id: str,
+    lease_seconds: int = config.JOB_LEASE_SECONDS,
 ) -> Job | None:
     row = conn.execute(
         "UPDATE job_queue SET"

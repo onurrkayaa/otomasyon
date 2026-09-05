@@ -2,6 +2,9 @@ import threading
 import time
 import uuid
 
+import pytest
+
+from kernel import config
 from kernel.state import db, queue
 
 
@@ -31,6 +34,22 @@ def test_claim_returns_enqueued_job():
 def test_claim_returns_none_when_empty():
     with db.tx() as conn:
         assert queue.claim(conn, "w1") is None
+
+
+def test_claim_default_lease_matches_config():
+    """Madde 3: varsayılan kira config.JOB_LEASE_SECONDS ile çelişmemeli."""
+    run_id = _make_run()
+    with db.tx() as conn:
+        queue.enqueue(conn, run_id, "n1")
+    with db.tx() as conn:
+        job = queue.claim(conn, "w1")
+        assert job is not None
+        remaining = conn.execute(
+            "SELECT extract(epoch FROM locked_until - now())"
+            " FROM job_queue WHERE id = %s",
+            (job.id,),
+        ).fetchone()[0]
+    assert remaining == pytest.approx(config.JOB_LEASE_SECONDS, abs=2)
 
 
 def test_locked_job_is_not_reclaimed_before_lease_expiry():

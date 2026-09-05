@@ -130,6 +130,12 @@ def _run_tool(
 
     if result.outcome is ToolOutcome.DEFERRED:
         with db.tx() as conn:
+            # Önce sahiplik (bkz. _advance): kira kaybedilmişse bu transaction
+            # hiçbir şey yazmadan kapanır.
+            if not queue.release(
+                conn, job.id, job.worker_id, result.retry_after_seconds
+            ):
+                return "lease_lost"
             conn.execute(
                 "UPDATE steps SET status = 'failed', ended_at = now(),"
                 " error = 'ertelendi' WHERE id = %s",
@@ -139,9 +145,6 @@ def _run_tool(
                 "UPDATE runs SET step_count = step_count + 1, updated_at = now()"
                 " WHERE id = %s",
                 (job.run_id,),
-            )
-            queue.release(
-                conn, job.id, job.worker_id, result.retry_after_seconds
             )
             events.append(
                 conn, job.run_id, "step_deferred", {"node_id": node.id}
