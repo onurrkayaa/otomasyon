@@ -91,8 +91,9 @@ class OfflineTransport:
     """Ağa çıkmadan sabit yanıt döndürür.
 
     Test iskelesi değildir: API anahtarı olmadan yerel geliştirme, kaos
-    testleri ve M5'teki gölge modunun temelidir. Kullanım maliyeti sıfırdır
-    ve muhasebe yolu yine de çalışır (usage alanları doldurulur).
+    testleri ve M5'teki gölge modunun temelidir. Kullanım GERÇEKTEN sıfırdır,
+    bu yüzden usage da sıfırdır: uydurma bir token sayısı runs.spent_usd'ye ve
+    llm_call_completed olayına gerçek maliyetmiş gibi girerdi.
     """
 
     def __init__(self, text: str = "offline-yanit"):
@@ -112,5 +113,5 @@ class OfflineTransport:
             text=self._text,
             model=model,
             stop_reason="end_turn",
-            usage=Usage(input_tokens=10, output_tokens=5),
+            usage=Usage(input_tokens=0, output_tokens=0),
         )

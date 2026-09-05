@@ -20,8 +20,8 @@ class SlowWriterTool(Tool):
     name: ClassVar[str] = "test.slow_writer"
     supports_reconcile: ClassVar[bool] = True
 
-    def idempotency_key(self, run_id: UUID, payload: dict) -> str:
-        return f"{run_id}:{payload['key']}"
+    def idempotency_key(self, run_id: UUID, node_id: str, payload: dict) -> str:
+        return f"{run_id}:{node_id}:{payload['key']}"
 
     def execute(self, payload: dict) -> dict:
         self._pause("before_write")
@@ -75,8 +75,8 @@ class NoReconcileTool(SlowWriterTool):
 class AlwaysFailsTool(Tool):
     name: ClassVar[str] = "test.always_fails"
 
-    def idempotency_key(self, run_id: UUID, payload: dict) -> str:
-        return f"{run_id}:fail"
+    def idempotency_key(self, run_id: UUID, node_id: str, payload: dict) -> str:
+        return f"{run_id}:{node_id}:fail"
 
     def execute(self, payload: dict) -> dict:
         raise RuntimeError("dış sistem patladı")

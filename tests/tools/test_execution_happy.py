@@ -45,7 +45,7 @@ def _side_effect_count(key: str) -> int:
 def test_happy_path_writes_once_and_completes():
     run_id, step_id = _make_run_and_step()
     result = execution.execute_tool(
-        registry.get("test.slow_writer"), run_id, step_id, {"key": "a"}
+        registry.get("test.slow_writer"), run_id, "kaydet", step_id, {"key": "a"}
     )
     assert result.outcome is ToolOutcome.COMPLETED
     assert result.response == {"written": "a"}
@@ -54,7 +54,7 @@ def test_happy_path_writes_once_and_completes():
     with db.tx() as conn:
         row = conn.execute(
             "SELECT status FROM tool_calls WHERE idempotency_key = %s",
-            (f"{run_id}:a",),
+            (f"{run_id}:kaydet:a",),
         ).fetchone()
     assert row[0] == "completed"
 
@@ -63,10 +63,10 @@ def test_second_call_with_same_key_does_not_execute_again():
     """Idempotency'nin asıl kazancı: kaydedilmiş yanıt döner, çağrı yapılmaz."""
     run_id, step_id = _make_run_and_step()
     first = execution.execute_tool(
-        registry.get("test.slow_writer"), run_id, step_id, {"key": "a"}
+        registry.get("test.slow_writer"), run_id, "kaydet", step_id, {"key": "a"}
     )
     second = execution.execute_tool(
-        registry.get("test.slow_writer"), run_id, step_id, {"key": "a"}
+        registry.get("test.slow_writer"), run_id, "kaydet", step_id, {"key": "a"}
     )
 
     assert first.outcome is ToolOutcome.COMPLETED
@@ -85,25 +85,25 @@ def test_reservation_is_created_before_execution():
             with db.independent_tx() as conn:
                 row = conn.execute(
                     "SELECT status FROM tool_calls WHERE idempotency_key = %s",
-                    (f"{run_id}:{payload['key']}",),
+                    (f"{run_id}:kaydet:{payload['key']}",),
                 ).fetchone()
             seen.append(row[0] if row else None)
             return super().execute(payload)
 
-    execution.execute_tool(Peeking(), run_id, step_id, {"key": "b"})
+    execution.execute_tool(Peeking(), run_id, "kaydet", step_id, {"key": "b"})
     assert seen == ["reserved"], "dış çağrı sırasında rezervasyon commit'li olmalı"
 
 
 def test_failure_marks_failed_and_allows_retry():
     run_id, step_id = _make_run_and_step()
     first = execution.execute_tool(
-        registry.get("test.always_fails"), run_id, step_id, {}
+        registry.get("test.always_fails"), run_id, "kaydet", step_id, {}
     )
     assert first.outcome is ToolOutcome.FAILED
     assert "dış sistem patladı" in (first.error or "")
 
     second = execution.execute_tool(
-        registry.get("test.always_fails"), run_id, step_id, {}
+        registry.get("test.always_fails"), run_id, "kaydet", step_id, {}
     )
     assert second.outcome is ToolOutcome.FAILED, "başarısız iş yeniden denenebilmeli"
 
@@ -147,7 +147,7 @@ def test_reservation_survives_outer_transaction_rollback():
     olarak geri alınıyor; satırın AYRI bir bağlantıdan hâlâ görünür ve
     'completed' olduğu doğrulanıyor."""
     run_id, step_id = _make_run_and_step()
-    key = f"{run_id}:d"
+    key = f"{run_id}:kaydet:d"
 
     class _Boom(Exception):
         pass
@@ -155,7 +155,7 @@ def test_reservation_survives_outer_transaction_rollback():
     with pytest.raises(_Boom):
         with db.tx() as _outer:
             execution.execute_tool(
-                registry.get("test.slow_writer"), run_id, step_id, {"key": "d"}
+                registry.get("test.slow_writer"), run_id, "kaydet", step_id, {"key": "d"}
             )
             raise _Boom("dış transaction'ı kasıtlı geri al")
 
@@ -190,6 +190,20 @@ def test_reserve_never_uses_shared_db_tx(monkeypatch):
     monkeypatch.setattr(db, "tx", _forbidden)
 
     result = execution.execute_tool(
-        registry.get("test.slow_writer"), run_id, step_id, {"key": "e"}
+        registry.get("test.slow_writer"), run_id, "kaydet", step_id, {"key": "e"}
     )
     assert result.outcome is ToolOutcome.COMPLETED
+
+
+def test_same_tool_on_two_nodes_keeps_separate_reservations():
+    """Ö5: aynı araç iki düğümde kullanılırsa ikinci düğüm birincinin
+    rezervasyonunu bulup yan etkiyi SESSİZCE atlamamalı."""
+    run_id, step_id = _make_run_and_step()
+    tool = registry.get("test.slow_writer")
+
+    first = execution.execute_tool(tool, run_id, "kaydet", step_id, {"key": "n"})
+    second = execution.execute_tool(tool, run_id, "kaydet_2", step_id, {"key": "n"})
+
+    assert first.outcome is ToolOutcome.COMPLETED
+    assert second.outcome is ToolOutcome.COMPLETED
+    assert _side_effect_count("n") == 2, "ikinci düğümün yan etkisi atlanmamalı"

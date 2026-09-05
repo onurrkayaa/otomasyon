@@ -64,11 +64,11 @@ def test_live_lease_defers_instead_of_blocking():
             " request, status, lease_expires_at) VALUES"
             " (%s, %s, 'test.slow_writer', %s, '{}'::jsonb, 'reserved',"
             "  now() + interval '60 seconds')",
-            (uuid.uuid4(), step_id, f"{run_id}:c"),
+            (uuid.uuid4(), step_id, f"{run_id}:kaydet:c"),
         )
 
     result = execution.execute_tool(
-        registry.get("test.slow_writer"), run_id, step_id, {"key": "c"}
+        registry.get("test.slow_writer"), run_id, "kaydet", step_id, {"key": "c"}
     )
     assert result.outcome is ToolOutcome.DEFERRED
     assert result.retry_after_seconds > 0
@@ -78,14 +78,14 @@ def test_live_lease_defers_instead_of_blocking():
 def test_expired_lease_with_reconcile_finding_write_does_not_rewrite():
     """Yazma gerçekleşmişti: reconcile bulur, TEKRAR YAZILMAZ."""
     run_id, step_id = _make_run_and_step()
-    key = f"{run_id}:d"
+    key = f"{run_id}:kaydet:d"
     _orphan_reservation(step_id, key, {"key": "d"})
     # Çökmeden önce yazma gerçekleşmişti:
     with db.tx() as conn:
         conn.execute("INSERT INTO side_effects (key) VALUES ('d')")
 
     result = execution.execute_tool(
-        registry.get("test.slow_writer"), run_id, step_id, {"key": "d"}
+        registry.get("test.slow_writer"), run_id, "kaydet", step_id, {"key": "d"}
     )
 
     assert result.outcome is ToolOutcome.COMPLETED
@@ -95,11 +95,11 @@ def test_expired_lease_with_reconcile_finding_write_does_not_rewrite():
 def test_expired_lease_with_reconcile_finding_nothing_reexecutes():
     """Yazma gerçekleşmemişti: reconcile bulamaz, güvenle tekrar çalıştırılır."""
     run_id, step_id = _make_run_and_step()
-    key = f"{run_id}:e"
+    key = f"{run_id}:kaydet:e"
     _orphan_reservation(step_id, key, {"key": "e"})
 
     result = execution.execute_tool(
-        registry.get("test.slow_writer"), run_id, step_id, {"key": "e"}
+        registry.get("test.slow_writer"), run_id, "kaydet", step_id, {"key": "e"}
     )
 
     assert result.outcome is ToolOutcome.COMPLETED
@@ -109,11 +109,11 @@ def test_expired_lease_with_reconcile_finding_nothing_reexecutes():
 def test_expired_lease_without_reconcile_becomes_uncertain():
     """Doğrulama yolu yok → kör tekrar YOK, insan kuyruğu."""
     run_id, step_id = _make_run_and_step()
-    key = f"{run_id}:f"
+    key = f"{run_id}:kaydet:f"
     _orphan_reservation(step_id, key, {"key": "f"})
 
     result = execution.execute_tool(
-        registry.get("test.no_reconcile"), run_id, step_id, {"key": "f"}
+        registry.get("test.no_reconcile"), run_id, "kaydet", step_id, {"key": "f"}
     )
 
     assert result.outcome is ToolOutcome.UNCERTAIN
@@ -129,14 +129,14 @@ def test_expired_lease_without_reconcile_becomes_uncertain():
 def test_uncertain_stays_uncertain_on_retry():
     """Belirsiz bir çağrı otomatik olarak tekrar denenmez."""
     run_id, step_id = _make_run_and_step()
-    key = f"{run_id}:g"
+    key = f"{run_id}:kaydet:g"
     _orphan_reservation(step_id, key, {"key": "g"})
     execution.execute_tool(
-        registry.get("test.no_reconcile"), run_id, step_id, {"key": "g"}
+        registry.get("test.no_reconcile"), run_id, "kaydet", step_id, {"key": "g"}
     )
 
     again = execution.execute_tool(
-        registry.get("test.no_reconcile"), run_id, step_id, {"key": "g"}
+        registry.get("test.no_reconcile"), run_id, "kaydet", step_id, {"key": "g"}
     )
     assert again.outcome is ToolOutcome.UNCERTAIN
     assert _count("g") == 0
@@ -145,7 +145,7 @@ def test_uncertain_stays_uncertain_on_retry():
 def test_reconcile_exception_becomes_uncertain():
     """K1: reconcile'ın kendisi patlarsa istisna yukarı kaçmaz, sonuç 'uncertain'."""
     run_id, step_id = _make_run_and_step()
-    key = f"{run_id}:h"
+    key = f"{run_id}:kaydet:h"
     _orphan_reservation(step_id, key, {"key": "h"})
 
     class ExplodingReconcile(SlowWriterTool):
@@ -153,7 +153,7 @@ def test_reconcile_exception_becomes_uncertain():
             raise ConnectionError("dış sisteme ulaşılamadı")
 
     result = execution.execute_tool(
-        ExplodingReconcile(), run_id, step_id, {"key": "h"}
+        ExplodingReconcile(), run_id, "kaydet", step_id, {"key": "h"}
     )
 
     assert result.outcome is ToolOutcome.UNCERTAIN

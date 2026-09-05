@@ -6,7 +6,7 @@ paketi ne import edilir ne de kurulu olması gerekir — client enjekte edilir.
 """
 from __future__ import annotations
 
-from kernel.gateway.transport import AnthropicTransport
+from kernel.gateway.transport import AnthropicTransport, OfflineTransport
 
 BETA = "server-side-fallback-2026-07-01"
 
@@ -111,3 +111,17 @@ def test_model_and_usage_are_read_from_the_response():
     assert raw.model == "claude-opus-5-20260115"
     assert raw.usage.input_tokens == 11
     assert raw.usage.cache_read_input_tokens == 3
+
+
+def test_offline_transport_does_not_invent_usage():
+    """Ö6: uydurma token sayısı denetim izine ve spent_usd'ye girmemeli."""
+    raw = OfflineTransport().send(
+        model="claude-opus-5",
+        effort="low",
+        system_layer1="a",
+        system_layer2="b",
+        user_content="c",
+        max_tokens=100,
+    )
+    assert raw.usage.input_tokens == 0
+    assert raw.usage.output_tokens == 0

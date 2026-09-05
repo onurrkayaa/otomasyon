@@ -77,7 +77,7 @@ def test_uncertain_tool_stops_the_run():
                 " request, status, lease_expires_at) VALUES"
                 " (%s, %s, 'test.no_reconcile', %s, '{}'::jsonb, 'reserved',"
                 "  now() - interval '1 second')",
-                (_uuid.uuid4(), step_id, f"{run_id}:k3"),
+                (_uuid.uuid4(), step_id, f"{run_id}:kaydet:k3"),
             )
         _drain()
         with db.tx() as conn:
@@ -282,7 +282,7 @@ def test_deferral_counts_against_max_steps():
             " request, status, lease_expires_at) VALUES"
             " (%s, %s, 'test.slow_writer', %s, '{}'::jsonb, 'reserved',"
             "  now() + interval '600 seconds')",
-            (_uuid.uuid4(), step_id, f"{run_id}:k9"),
+            (_uuid.uuid4(), step_id, f"{run_id}:kaydet:k9"),
         )
 
     runner.run_once("w1", gw)  # kaydet ertelenir
@@ -292,3 +292,37 @@ def test_deferral_counts_against_max_steps():
             "SELECT step_count FROM runs WHERE id = %s", (run_id,)
         ).fetchone()[0]
     assert step_count == 2, "erteleme adım bütçesinden düşmeli"
+
+
+def test_same_idempotency_key_returns_the_same_run():
+    """Ö4: aynı anahtarla ikinci start_run yeni run YARATMAZ."""
+    first = runner.start_run(
+        "t1", {"text": "x", "key": "k10"}, idempotency_key="fatura-42"
+    )
+    second = runner.start_run(
+        "t1", {"text": "y", "key": "k11"}, idempotency_key="fatura-42"
+    )
+
+    assert first == second
+    with db.tx() as conn:
+        runs = conn.execute("SELECT count(*) FROM runs").fetchone()[0]
+        jobs = conn.execute("SELECT count(*) FROM job_queue").fetchone()[0]
+        created = [
+            e for e in events.read(conn, first) if e.type == "run_created"
+        ]
+    assert runs == 1
+    assert jobs == 1, "tekrar edilen istek ikinci işi kuyruğa koymamalı"
+    assert len(created) == 1
+
+
+def test_different_idempotency_keys_create_separate_runs():
+    a = runner.start_run("t1", {"text": "x", "key": "k12"}, idempotency_key="a")
+    b = runner.start_run("t1", {"text": "x", "key": "k13"}, idempotency_key="b")
+    assert a != b
+
+
+def test_build_gateway_requires_explicit_transport(monkeypatch):
+    """Ö6: env yoksa sessizce 'offline'a düşmek üretimde sahte başarı üretir."""
+    monkeypatch.delenv("OTOMASYON_TRANSPORT", raising=False)
+    with pytest.raises(ValueError):
+        runner.build_gateway()

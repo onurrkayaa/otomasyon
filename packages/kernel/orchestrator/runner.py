@@ -14,6 +14,7 @@ import uuid
 from decimal import Decimal
 from uuid import UUID
 
+import psycopg
 from psycopg.types.json import Jsonb
 
 from kernel import config
@@ -25,25 +26,49 @@ from kernel.state import db, events, queue
 _running = True
 
 
-def start_run(tenant_id: str, payload: dict, budget_usd: str = "1.0") -> UUID:
+def start_run(
+    tenant_id: str,
+    payload: dict,
+    budget_usd: str = "1.0",
+    idempotency_key: str | None = None,
+) -> UUID:
+    """Anahtar verilmezse her çağrı yeni bir run başlatır.
+
+    Verilirse runs_idem_unique kısıtı çalışma-seviyesi tam-bir-kez oluşturma
+    garantisi verir: aynı anahtarla ikinci istek mevcut run_id'yi döndürür,
+    yeni iş kuyruğa girmez ("aynı faturayı iki kere gönderdim").
+    """
     run_id = uuid.uuid4()
-    with db.tx() as conn:
-        conn.execute(
-            "INSERT INTO runs (id, tenant_id, workflow_name, workflow_version_hash,"
-            " status, input, budget_usd, max_steps, idempotency_key)"
-            " VALUES (%s, %s, %s, %s, 'running', %s, %s, 25, %s)",
-            (
-                run_id,
-                tenant_id,
-                flow.WORKFLOW_NAME,
-                flow.WORKFLOW_VERSION_HASH,
-                Jsonb(payload),
-                Decimal(budget_usd),
-                str(run_id),
-            ),
-        )
-        events.append(conn, run_id, "run_created", {"tenant_id": tenant_id})
-        queue.enqueue(conn, run_id, flow.FIRST_NODE)
+    key = idempotency_key if idempotency_key is not None else str(run_id)
+    try:
+        with db.tx() as conn:
+            conn.execute(
+                "INSERT INTO runs (id, tenant_id, workflow_name,"
+                " workflow_version_hash, status, input, budget_usd, max_steps,"
+                " idempotency_key)"
+                " VALUES (%s, %s, %s, %s, 'running', %s, %s, 25, %s)",
+                (
+                    run_id,
+                    tenant_id,
+                    flow.WORKFLOW_NAME,
+                    flow.WORKFLOW_VERSION_HASH,
+                    Jsonb(payload),
+                    Decimal(budget_usd),
+                    key,
+                ),
+            )
+            events.append(conn, run_id, "run_created", {"tenant_id": tenant_id})
+            queue.enqueue(conn, run_id, flow.FIRST_NODE)
+    except psycopg.errors.UniqueViolation:
+        # Transaction tümüyle geri alındı: olay da iş de yazılmadı.
+        with db.tx() as conn:
+            row = conn.execute(
+                "SELECT id FROM runs WHERE tenant_id = %s AND workflow_name = %s"
+                " AND idempotency_key = %s",
+                (tenant_id, flow.WORKFLOW_NAME, key),
+            ).fetchone()
+        assert row is not None
+        return row[0]
     return run_id
 
 
@@ -105,8 +130,17 @@ def run_forever(worker_id: str, gateway: Gateway) -> None:
 
 
 def build_gateway() -> Gateway:
-    """OTOMASYON_TRANSPORT: 'offline' (varsayılan) veya 'live'."""
-    kind = os.environ.get("OTOMASYON_TRANSPORT", "offline")
+    """OTOMASYON_TRANSPORT: 'live' ya da 'offline'. VARSAYILAN YOK.
+
+    Sessiz bir varsayılan, env'i set edilmeden dağıtılan bir worker'ın her
+    LLM çağrısına sabit yanıt vermesi ve run'ın 'completed' olması demektir:
+    müşterinin işi "başarıyla" biter, hiçbir şey yapılmamıştır.
+    """
+    kind = os.environ.get("OTOMASYON_TRANSPORT")
+    if kind is None:
+        raise ValueError(
+            "OTOMASYON_TRANSPORT tanımlı değil. Geçerli değerler: 'live', 'offline'"
+        )
     if kind == "live":
         return Gateway(AnthropicTransport())
     if kind == "offline":

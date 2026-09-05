@@ -35,8 +35,13 @@ class Tool(ABC):
     external_idempotency: ClassVar[bool] = False
 
     @abstractmethod
-    def idempotency_key(self, run_id: UUID, payload: dict) -> str:
-        """Bu yan etkinin evrensel kimliği. Yeniden denemede DEĞİŞMEMELİDİR."""
+    def idempotency_key(self, run_id: UUID, node_id: str, payload: dict) -> str:
+        """Bu yan etkinin evrensel kimliği. Yeniden denemede DEĞİŞMEMELİDİR.
+
+        node_id anahtarın parçasıdır: aynı aracı iki düğümde kullanan bir akışta
+        (spec §10 referans akışı) ikinci düğüm aksi halde birincinin 'completed'
+        rezervasyonunu bulur ve yan etkiyi SESSİZCE atlar.
+        """
 
     @abstractmethod
     def execute(self, payload: dict) -> dict:

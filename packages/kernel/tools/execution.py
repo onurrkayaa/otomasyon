@@ -23,11 +23,12 @@ from kernel.tools.base import Tool, ToolOutcome, ToolResult
 def execute_tool(
     tool: Tool,
     run_id: UUID,
+    node_id: str,
     step_id: UUID,
     payload: dict,
     lease_seconds: int = 60,
 ) -> ToolResult:
-    key = tool.idempotency_key(run_id, payload)
+    key = tool.idempotency_key(run_id, node_id, payload)
 
     if _reserve(tool.name, step_id, key, payload, lease_seconds):
         return _call_and_complete(tool, key, payload)

@@ -118,6 +118,7 @@ def _run_tool(
     result = execution.execute_tool(
         registry.get(node.tool),
         job.run_id,
+        node.id,
         step_id,
         payload,
         lease_seconds=config.TOOL_LEASE_SECONDS,
