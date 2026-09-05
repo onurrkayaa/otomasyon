@@ -155,3 +155,44 @@ def test_run_is_dead_lettered_after_max_attempts(monkeypatch):
     assert len(uncertain) == 1
     assert uncertain[0].payload["error_class"] == "KeyError"
     assert "error" not in uncertain[0].payload, "ham metin olay kaydına yazılmamalı"
+
+
+def test_lost_lease_cancels_the_advance():
+    """K2: kirasını kaybeden worker akışı ilerletemez — sonraki düğüm için
+    İKİ iş oluşmaz, runs durumu bir kez yazılır."""
+    from kernel.orchestrator import step
+    from kernel.state import queue
+
+    run_id = runner.start_run("t1", {"text": "x", "key": "k6"})
+    gw = Gateway(OfflineTransport())
+
+    with db.tx() as conn:
+        job_a = queue.claim(conn, "wA", 30)
+    assert job_a is not None
+    with db.tx() as conn:
+        conn.execute(
+            "UPDATE job_queue SET locked_until = now() - interval '1 second'"
+            " WHERE id = %s",
+            (job_a.id,),
+        )
+    with db.tx() as conn:
+        job_b = queue.claim(conn, "wB", 300)
+    assert job_b is not None and job_b.id == job_a.id
+
+    assert step.execute_step(job_a, gw) == "lease_lost"
+
+    with db.tx() as conn:
+        jobs = conn.execute(
+            "SELECT node_id, locked_by FROM job_queue WHERE run_id = %s", (run_id,)
+        ).fetchall()
+        types = [e.type for e in events.read(conn, run_id)]
+    assert jobs == [("ozetle", "wB")], "kaybeden worker sonraki düğümü kuyruğa koymamalı"
+    assert "run_completed" not in types
+
+    # Gerçek sahip ilerletince kuyrukta yine TEK iş olur.
+    assert step.execute_step(job_b, gw) == "advanced"
+    with db.tx() as conn:
+        jobs = conn.execute(
+            "SELECT node_id FROM job_queue WHERE run_id = %s", (run_id,)
+        ).fetchall()
+    assert jobs == [("kaydet",)]

@@ -117,7 +117,9 @@ def _run_tool(
                 " error = 'ertelendi' WHERE id = %s",
                 (step_id,),
             )
-            queue.release(conn, job.id, result.retry_after_seconds)
+            queue.release(
+                conn, job.id, job.worker_id, result.retry_after_seconds
+            )
             events.append(
                 conn, job.run_id, "step_deferred", {"node_id": node.id}
             )
@@ -150,7 +152,11 @@ def _finish_step(job: queue.Job, step_id: UUID, output: dict) -> None:
 
 def _advance(job: queue.Job, node: flow.Node) -> str:
     with db.tx() as conn:
-        queue.complete(conn, job.id)
+        # Önce sahiplik: kira kaybedilmişse bu transaction hiçbir şey yazmadan
+        # kapanır. Aksi halde işi devralan worker'la birlikte akış İKİ kez
+        # ilerler (sonraki düğüm için iki iş, iki kez durum yazımı).
+        if not queue.complete(conn, job.id, job.worker_id):
+            return "lease_lost"
         if node.next is None:
             conn.execute(
                 "UPDATE runs SET status = 'completed', updated_at = now()"
@@ -165,6 +171,9 @@ def _advance(job: queue.Job, node: flow.Node) -> str:
 
 def _fail_run(job: queue.Job, step_id: UUID, run_status: str, error: str) -> str:
     with db.tx() as conn:
+        # Sahiplik önce (bkz. _advance): kira kaybedilmişse run durumunu yazma.
+        if not queue.complete(conn, job.id, job.worker_id):
+            return "lease_lost"
         conn.execute(
             "UPDATE steps SET status = 'failed', error = %s, ended_at = now()"
             " WHERE id = %s",
@@ -174,7 +183,6 @@ def _fail_run(job: queue.Job, step_id: UUID, run_status: str, error: str) -> str
             "UPDATE runs SET status = %s, updated_at = now() WHERE id = %s",
             (run_status, job.run_id),
         )
-        queue.complete(conn, job.id)
         events.append(
             conn, job.run_id, "run_" + run_status, {"error": error}
         )

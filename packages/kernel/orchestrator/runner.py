@@ -78,10 +78,13 @@ def _handle_step_exception(job: queue.Job, exc: Exception) -> None:
     """
     if job.attempts < config.MAX_JOB_ATTEMPTS:
         with db.tx() as conn:
-            queue.release(conn, job.id, _backoff_seconds(job.attempts))
+            queue.release(
+                conn, job.id, job.worker_id, _backoff_seconds(job.attempts)
+            )
         return
     with db.tx() as conn:
-        queue.complete(conn, job.id)
+        if not queue.complete(conn, job.id, job.worker_id):
+            return
         conn.execute(
             "UPDATE runs SET status = 'uncertain', updated_at = now()"
             " WHERE id = %s",

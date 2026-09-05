@@ -124,7 +124,7 @@ def test_release_delays_availability():
         queue.enqueue(conn, run_id, "n1")
         job = queue.claim(conn, "w1")
         assert job is not None
-        queue.release(conn, job.id, delay_seconds=60)
+        queue.release(conn, job.id, "w1", delay_seconds=60)
 
     with db.tx() as conn:
         assert queue.claim(conn, "w2") is None, "gecikmeli iş hemen alınamaz"
@@ -136,7 +136,68 @@ def test_complete_removes_job():
         queue.enqueue(conn, run_id, "n1")
         job = queue.claim(conn, "w1")
         assert job is not None
-        queue.complete(conn, job.id)
+        queue.complete(conn, job.id, "w1")
 
     with db.tx() as conn:
         assert queue.claim(conn, "w2") is None
+
+
+def _steal(job_id: int) -> None:
+    """Kirayı geçmişe çekip işi başka bir worker'a kaptırır."""
+    with db.tx() as conn:
+        conn.execute(
+            "UPDATE job_queue SET locked_until = now() - interval '1 second'"
+            " WHERE id = %s",
+            (job_id,),
+        )
+    with db.tx() as conn:
+        stolen = queue.claim(conn, "w2")
+    assert stolen is not None and stolen.id == job_id
+
+
+def test_claim_reports_the_owning_worker():
+    run_id = _make_run()
+    with db.tx() as conn:
+        queue.enqueue(conn, run_id, "n1")
+    with db.tx() as conn:
+        job = queue.claim(conn, "w1")
+    assert job is not None and job.worker_id == "w1"
+
+
+def test_complete_requires_ownership():
+    """K2: kirasını kaybeden worker işi kuyruktan SİLEMEZ."""
+    run_id = _make_run()
+    with db.tx() as conn:
+        queue.enqueue(conn, run_id, "n1")
+        job = queue.claim(conn, "w1")
+    assert job is not None
+    _steal(job.id)
+
+    with db.tx() as conn:
+        assert queue.complete(conn, job.id, "w1") is False
+    with db.tx() as conn:
+        left = conn.execute(
+            "SELECT count(*) FROM job_queue WHERE id = %s", (job.id,)
+        ).fetchone()[0]
+    assert left == 1, "sahipliği kaybeden worker'ın silmesi uygulanmamalı"
+
+    with db.tx() as conn:
+        assert queue.complete(conn, job.id, "w2") is True
+
+
+def test_release_requires_ownership():
+    """K2: kirasını kaybeden worker yeni sahibin kilidini düşüremez."""
+    run_id = _make_run()
+    with db.tx() as conn:
+        queue.enqueue(conn, run_id, "n1")
+        job = queue.claim(conn, "w1")
+    assert job is not None
+    _steal(job.id)
+
+    with db.tx() as conn:
+        assert queue.release(conn, job.id, "w1", delay_seconds=60) is False
+    with db.tx() as conn:
+        locked_by = conn.execute(
+            "SELECT locked_by FROM job_queue WHERE id = %s", (job.id,)
+        ).fetchone()[0]
+    assert locked_by == "w2", "yeni sahibin kilidi düşürülmemeli"
