@@ -490,7 +490,13 @@ def parse_workflow(source: str) -> WorkflowSpec:
         ham = yaml.safe_load(source)
     except yaml.YAMLError as exc:
         raise CompileFailed(
-            CompileReport(errors=[CompileError(code=E_SEMA, message=f"YAML ayrıştırılamadı: {exc}")])
+            CompileReport(errors=[CompileError(
+                code=E_SEMA,
+                # Ham istisna ASLA string'e çevrilmez: PyYAML'ın hata metni
+                # hatanın etrafındaki KAYNAK SATIRI içerir (Mark.__str__ →
+                # get_snippet()). Konfig dosyasında o satır bir sır olabilir.
+                message=f"YAML ayrıştırılamadı: {yaml_guvenli.hata_metni(exc)}",
+            )])
         ) from exc
     if not isinstance(ham, dict):
         raise CompileFailed(
@@ -759,7 +765,10 @@ def load_profile(path: Path) -> Profile:
         ham = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
     except yaml.YAMLError as exc:
         raise CompileFailed(
-            CompileReport(errors=[CompileError(code=E_SEMA, message=f"profil ayrıştırılamadı: {exc}")])
+            CompileReport(errors=[CompileError(
+                code=E_SEMA,
+                message=f"profil ayrıştırılamadı: {yaml_guvenli.hata_metni(exc)}",
+            )])
         ) from exc
     try:
         pr = Profile.model_validate(ham)
@@ -3244,6 +3253,19 @@ git commit -m "fix(gateway): kiralı bütçe rezervasyonu — TOCTOU kapatıldı
 
 M1'in ikinci park edilmiş maddesi. Spec §6.5: *"PII maskeleme tek noktada. Kurumsal veri dışarı çıkmadan maskelenir; KVKK tartışmasında gösterilecek tek nokta ağ geçididir."* İkinci bir yer daha var ve M1'de o da açıktı: **olay kaydı**. Kural 5 gereği `events` satırı asla silinemez — oraya sızan bir TCKN sonsuza kadar orada kalır. Maskeleme bu yüzden iki yüzeyi birden kapatır.
 
+**Üçüncü maskeleme yüzeyi.** Prompt ve olay kaydının yanında bir yer daha var:
+`execution.py:63` ham araç istisnasını `{"error": str(exc)}` olarak
+`tool_calls.response` jsonb kolonuna yazıyor, `execution.py:173` ise
+`f"{reason}: {exc}"` üretiyor. Bir ERP istemcisinin istisna metni müşteri
+verisi taşıyabilir. Bu satır `events` gibi ekleme-yalnız değil (dolayısıyla
+temizlenebilir) ve bu yüzden Kritik değil, ama aynı sınıftan bir sızıntıdır
+ve düzeltmesi tek bir `masking.scrub()` çağrısıdır. İkisini de kapat.
+
+**Bilinçli olarak maskelenmeyenler:** `expr.parse_part` ve `parse_case`'in
+fırlattığı `ValueError`'ların metinleri (Görev 3) BİZİM yazdığımız, sınırlı
+mesajlardır ve yalnız derleme çıktısına gider; ham bir üçüncü parti istisna
+metni değildir. Onlara dokunma.
+
 **ZK2 zorunlu:** maskeleme haritası süreç belleğinde tutulamaz. `steps.pii_map`
 kolonuna Fernet ile şifreli ve TTL'li yazılır; taşıma katmanı çağrılmadan ÖNCE
 commit edilir, yanıt çözüldükten sonra `NULL`'lanır, artakalanlar worker
@@ -3255,6 +3277,7 @@ boştayken süpürülür. Ayrıntılı gerekçe: "Zorunlu Mimari Kurallar" böl�
 - Değiştir: `pyproject.toml` (`cryptography>=43`)
 - Değiştir: `packages/kernel/gateway/gateway.py` (maskele → gönder → maskeyi çöz)
 - Değiştir: `packages/kernel/orchestrator/step.py` (`error_payload` olay kaydına maskeli yazar)
+- Değiştir: `packages/kernel/tools/execution.py` (ham araç istisnası `tool_calls.response`'a maskeli yazılır — **üçüncü yüzey**, aşağıya bak)
 - Değiştir: `packages/kernel/orchestrator/runner.py` (profil → varsayılan maskeleyici)
 - Test: `tests/gateway/test_masking.py`
 
