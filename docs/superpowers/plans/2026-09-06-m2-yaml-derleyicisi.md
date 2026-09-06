@@ -3261,6 +3261,30 @@ verisi taşıyabilir. Bu satır `events` gibi ekleme-yalnız değil (dolayısıy
 temizlenebilir) ve bu yüzden Kritik değil, ama aynı sınıftan bir sızıntıdır
 ve düzeltmesi tek bir `masking.scrub()` çağrısıdır. İkisini de kapat.
 
+**Sözleşmeyi MEKANİK zorla (Görev 2'nin yeniden gözden geçirmesinden devralındı).**
+`yaml_guvenli.safe_load` bugün yalnız `yaml.safe_load`'u sarmalıyor ve istisnayı
+çağırana bırakıyor; "hata_metni() kullan" kuralı sadece docstring'de yazıyor.
+Üçüncü bir çağrı yeri hatayı doğrudan f-string'e koyarsa — bu düzeltmenin
+kapattığı kalıbın ta kendisi — hiçbir şey engellemez. Yükleme ile hata
+çevrimini tek fonksiyonda birleştir:
+
+```python
+def yukle(source: str, ne: str) -> object:
+    """YAML'ı yükler; bozuksa mesajı GÜVENLİ kurulmuş CompileFailed fırlatır.
+
+    Ham istisnaya erişim çağırana hiç verilmez: sızıntı yapılabilir olmaktan
+    çıkar. Güvence konvansiyona değil fonksiyon imzasına bağlanır.
+    """
+    try:
+        return yaml.safe_load(source)
+    except yaml.YAMLError as exc:
+        raise CompileFailed(CompileReport(errors=[CompileError(
+            code=E_SEMA, message=f"{ne}: {hata_metni(exc)}")])) from exc
+```
+
+`loader.py` ve `profile.py`'deki iki `try/except` bloğunu buna indir. Mevcut üç
+regresyon testi değişmeden geçmeli — geçmiyorsa davranış kaymıştır.
+
 **Bilinçli olarak maskelenmeyenler:** `expr.parse_part` ve `parse_case`'in
 fırlattığı `ValueError`'ların metinleri (Görev 3) BİZİM yazdığımız, sınırlı
 mesajlardır ve yalnız derleme çıktısına gider; ham bir üçüncü parti istisna
