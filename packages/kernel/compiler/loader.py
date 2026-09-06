@@ -12,6 +12,7 @@ from pathlib import Path
 import yaml
 from pydantic import BaseModel, ValidationError
 
+from kernel.compiler import yaml_guvenli
 from kernel.compiler.errors import E_SEMA, CompileError, CompileFailed, CompileReport
 from kernel.compiler.schema import WorkflowSpec
 
@@ -25,10 +26,17 @@ class LoadedWorkflow(BaseModel):
 def parse_workflow(source: str) -> WorkflowSpec:
     """Metin → spec. Bozuksa CompileFailed fırlatır."""
     try:
-        ham = yaml.safe_load(source)
+        ham = yaml_guvenli.safe_load(source)
     except yaml.YAMLError as exc:
         raise CompileFailed(
-            CompileReport(errors=[CompileError(code=E_SEMA, message=f"YAML ayrıştırılamadı: {exc}")])
+            CompileReport(
+                errors=[
+                    CompileError(
+                        code=E_SEMA,
+                        message=f"YAML ayrıştırılamadı: {yaml_guvenli.hata_metni(exc)}",
+                    )
+                ]
+            )
         ) from exc
     if not isinstance(ham, dict):
         raise CompileFailed(

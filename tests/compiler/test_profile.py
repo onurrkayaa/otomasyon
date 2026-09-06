@@ -79,6 +79,17 @@ def test_ozel_sir_alani_isaretlenebilir(tmp_path):
     assert exc.value.report.codes() == ["E_SIR"]
 
 
+def test_ozel_sir_alani_harf_duyarsiz_eslesir(tmp_path):
+    """`secret_fields: {erp: [Endpoint]}` gerçek alan adı `endpoint` ile eşleşmeli.
+
+    Harf farkıyla sessizce kaçan bir eşleşme, işaretlenmemiş bir sır demektir.
+    """
+    metin = GECERLI + "\nsecret_fields:\n  erp: [Endpoint]\n"
+    with pytest.raises(CompileFailed) as exc:
+        P.load_profile(yaz(tmp_path, metin))
+    assert exc.value.report.codes() == ["E_SIR"]
+
+
 def test_maskeleme_kapatilirsa_uyari_uretilir(tmp_path):
     """KK5: sessizce kapanmaz."""
     metin = GECERLI.replace("enabled: true", "enabled: false")
@@ -95,3 +106,19 @@ def test_maskeleme_blogu_yoksa_varsayilan_ACIK(tmp_path):
     pr = P.load_profile(yaz(tmp_path, metin))
     assert pr.masking.enabled is True
     assert set(pr.masking.patterns) == set(P.VARSAYILAN_DESENLER)
+
+
+def test_bozuk_yaml_hatasi_SIRRI_SIZDIRMAZ(tmp_path):
+    """K14: sözdizimini BOZAN bir düz metin sır, hata mesajına düşmemeli.
+
+    Mevcut test paketi yalnız sözdizimsel olarak geçerli ama semantik olarak
+    yanlış bir sırrı ("Hunter2!") kapsıyordu. Sözdizimini bozan sır, K14'ün
+    hedeflediği senaryonun ta kendisi: derleme çıktısı CI loglarına gider.
+    """
+    sir = "Hunter2Secret: evet boyle"
+    bozuk = GECERLI.replace('"env: ACME_SAP_PASSWORD"', f'"{sir}')
+    with pytest.raises(CompileFailed) as exc:
+        P.load_profile(yaz(tmp_path, bozuk))
+    assert "Hunter2Secret" not in str(exc.value)
+    assert exc.value.report.codes() == ["E_SEMA"]
+    assert "satır" in str(exc.value), "konum bilgisi korunmalı, yalnız içerik atılmalı"

@@ -18,6 +18,7 @@ from pathlib import Path
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from kernel.compiler import yaml_guvenli
 from kernel.compiler.errors import (
     E_SEMA,
     E_SIR,
@@ -65,9 +66,10 @@ class Profile(Strict):
 
 
 def is_secret_field(connector: str, field: str, profile_secret_fields: dict) -> bool:
-    if field in profile_secret_fields.get(connector, []):
+    ad = field.lower()
+    if ad in {a.lower() for a in profile_secret_fields.get(connector, [])}:
         return True
-    return field.lower().endswith(SECRET_FIELD_SUFFIXES)
+    return ad.endswith(SECRET_FIELD_SUFFIXES)
 
 
 def _sir_denetimi(pr: Profile) -> list[CompileError]:
@@ -92,10 +94,17 @@ def _sir_denetimi(pr: Profile) -> list[CompileError]:
 
 def load_profile(path: Path) -> Profile:
     try:
-        ham = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+        ham = yaml_guvenli.safe_load(Path(path).read_text(encoding="utf-8"))
     except yaml.YAMLError as exc:
         raise CompileFailed(
-            CompileReport(errors=[CompileError(code=E_SEMA, message=f"profil ayrıştırılamadı: {exc}")])
+            CompileReport(
+                errors=[
+                    CompileError(
+                        code=E_SEMA,
+                        message=f"profil ayrıştırılamadı: {yaml_guvenli.hata_metni(exc)}",
+                    )
+                ]
+            )
         ) from exc
     try:
         pr = Profile.model_validate(ham)

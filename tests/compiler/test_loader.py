@@ -79,3 +79,12 @@ def test_version_hash_icerige_bagli(tmp_path):
     b = loader.load_workflow(yaz(tmp_path, GECERLI + "\n")).version_hash
     assert a != b
     assert len(a) == 64
+
+
+def test_bozuk_yaml_hatasi_KAYNAK_METNI_SIZDIRMAZ(tmp_path):
+    """Aynı kusur yükleyicide de vardı; iki çağrı yeri tek yardımcıya bağlı."""
+    hassas = "GIZLI_MUSTERI_VERISI: bozuk"
+    with pytest.raises(CompileFailed) as exc:
+        loader.load_workflow(yaz(tmp_path, f'apiVersion: v1\nname: x\nnot: "{hassas}\n'))
+    assert "GIZLI_MUSTERI_VERISI" not in str(exc.value)
+    assert exc.value.report.codes() == ["E_SEMA"]
