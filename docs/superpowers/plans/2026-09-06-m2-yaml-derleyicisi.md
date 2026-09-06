@@ -232,7 +232,9 @@ def test_gecerli_yaml_tipli_spece_donusur(tmp_path):
     assert yuklu.spec.name == "mini"
     assert [n.id for n in yuklu.spec.graph] == ["ozetle", "kaydet"]
     assert yuklu.spec.graph[1].type == "tool"
-    assert yuklu.spec.graph[1].idempotency == ["run_id", "node_id"]
+    # Şema DÖNÜŞÜM yapmaz: ayrıştırılan değer YAML'daki değerin aynısıdır.
+    # `{{ }}` ifadelerinin çözümü Görev 8'in, anlamsal denetimi Görev 3'ün işi.
+    assert yuklu.spec.graph[1].idempotency == ["{{ run.id }}", "{{ node.id }}"]
     assert yuklu.spec.defaults.retry.attempts == 2
 ```
 
@@ -2003,8 +2005,9 @@ from kernel.compiler.graph import Graph
 from kernel.types import CEKIRDEK_TIPLER
 
 LISTE_DESENI = re.compile(r"^(?:list|List)\[(.+)\]$")
-# Çalışma zamanında çözülen, düğüm yoluna karşılık gelmeyen anahtar parçaları.
-YERLESIK_ANAHTARLAR = frozenset({"run_id", "node_id", "tenant_id"})
+# ZK3: idempotency parçaları `{{ }}` ile yazılır ve `expr` ile ayrıştırılır.
+# Yerleşik referans adları orada tanımlıdır (expr.SABIT_REFERANSLAR,
+# expr.RUN_REFERANSI); burada ikinci bir liste tutmak sessiz sapma üretir.
 
 
 def load_types(path: Path) -> dict[str, type[BaseModel]]:
@@ -3826,7 +3829,8 @@ from uuid import UUID
 
 from kernel.state import db
 
-YERLESIK = {"run_id", "node_id", "tenant_id"}
+# Yerleşik referanslar `compiler.expr`'de tanımlıdır; burada kopyalanmaz
+# (iki liste = derleyiciyle çalışma zamanının sessizce ayrışması).
 
 
 def resolve_path(run_id: UUID, path: str) -> object:
