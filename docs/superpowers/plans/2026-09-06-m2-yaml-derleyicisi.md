@@ -57,7 +57,7 @@ Dallanmayan bir düğümün (`llm_task`, `tool`, `human_approval`) birden fazla 
 *Yanlışsa maliyeti:* M3'e taşınacak yirmi satır.
 
 **KK4 — Idempotency anahtarı konfigden gelir, araçtan değil.**
-M1'de `Tool.idempotency_key(run_id, node_id, payload)` soyut bir metottu. §4.1(1) çift yazma korumasının **konfig seviyesinde** imkânsız kılınmasını şart koşuyor; anahtar araç kodunda gizliyken derleyici onu doğrulayamaz. Karar: anahtar YAML'daki `idempotency: [run_id, cikar.fatura.fatura_no]` listesinden derlenir, çalışma zamanında çözülür ve `execute_tool`'a hazır verilir. `Tool.idempotency_key` sözleşmeden **kaldırılır**.
+M1'de `Tool.idempotency_key(run_id, node_id, payload)` soyut bir metottu. §4.1(1) çift yazma korumasının **konfig seviyesinde** imkânsız kılınmasını şart koşuyor; anahtar araç kodunda gizliyken derleyici onu doğrulayamaz. Karar: anahtar YAML'daki `idempotency: ["{{ run.id }}", "{{ cikar.fatura.fatura_no }}"]` listesinden derlenir, çalışma zamanında çözülür ve `execute_tool`'a hazır verilir. `Tool.idempotency_key` sözleşmeden **kaldırılır**.
 *Yanlışsa maliyeti:* bir metodun geri eklenmesi; M2'de yapmak M3'te yapmaktan ucuz, çünkü çağrı yerleri henüz az.
 
 **KK5 — Maskeleme varsayılan olarak AÇIK; kapatmak açık beyan ister.**
@@ -67,6 +67,63 @@ M1'de `Tool.idempotency_key(run_id, node_id, payload)` soyut bir metottu. §4.1(
 **KK6 — Spec §9.1'in YAML örneği olduğu gibi yüklenmez.**
 `username: env: ACME_SAP_USER` geçerli YAML değildir (değersiz iç içe eşleme). Doğru biçim tırnaklıdır: `username: "env: ACME_SAP_USER"`. Referans profil ve derleyici bu biçimi kullanır; spec'in örneği açıklayıcıdır, yükleyici değil.
 *Yanlışsa maliyeti:* yok — alternatif yok, öteki biçim ayrıştırılamıyor.
+
+---
+
+## Zorunlu Mimari Kurallar (kullanıcı tarafından konuldu)
+
+Bu üç kural tartışmaya kapalıdır ve ilgili görevlerin kabul şartıdır. Uygulayıcı
+bunlardan sapamaz; gözden geçiren sapmayı Kritik bulgu sayar.
+
+**ZK1 — Döngü tespiti topolojik sıralamayla yapılır (Görev 3).**
+Graf asikliği DFS renklendirmesiyle ya da "derinlik sınırı" gibi bir yaklaşımla
+değil, **Kahn topolojik sıralamasıyla** kanıtlanır: sıraya giren düğüm sayısı
+toplam düğüm sayısından azsa graf döngülüdür. Gerekçe iki katlı: topolojik sıra
+zaten tavan maliyet DP'si (Görev 5) ve doğrulama gezisi için gereklidir, yani
+döngü tespiti bedava gelir; ve tek bir mekanizma iki iddiayı birden taşıdığı için
+ikisinin birbirinden sapması mümkün değildir.
+
+**ZK2 — PII maskeleme haritası RAM'de değil, veritabanında şifreli ve süreli
+tutulur (Görev 6 + 7).**
+`MaskSession` haritayı süreç belleğinde tutamaz. Harita `steps.pii_map`
+kolonuna **şifreli** (Fernet, anahtar yalnız `OTOMASYON_PII_KEY` ortam
+değişkeninden — K14) ve **süreli** (`steps.pii_map_expires_at`) yazılır.
+Yazma sırası bağlayıcıdır: harita, taşıma katmanı çağrılmadan ÖNCE commit
+edilir; yanıt maskesi çözüldükten sonra kolon `NULL`'lanır; artakalanlar
+worker boştayken süpürülür.
+
+Üç gerekçe: (a) çağrının ortasında ölen bir worker'ın haritası kaybolmaz, yani
+devralan worker kaydedilmiş bir yanıtı çözebilir — RAM'deki harita ölümle
+birlikte gider ve maskeli metin kalıcı olarak anlamsızlaşır; (b) harita
+görünmez süreç durumu olmaktan çıkıp TTL'i olan, denetlenebilir bir kayda
+dönüşür — KVKK tartışmasında gösterilebilir; (c) şifreleme olmadan bu kolon
+kendi başına bir PII deposu olurdu.
+
+Sert sınır: `pii_map` **asla** `events` tablosuna yazılmaz. `events`
+ekleme-yalnızdır (Kural 5) ve oraya yazılan bir harita hiçbir zaman
+silinemezdi. `steps` UPDATE edilebilir olduğu için temizlenebilir — kolonun
+orada olmasının nedeni budur.
+
+**ZK3 — `idempotency` statik olamaz; en az bir run-değişken referans zorunludur
+(Görev 1 şeması + Görev 3 denetimi).**
+Anahtar parçaları `{{ ... }}` şablon söz dizimiyle yazılır; şablon dışındaki
+her parça düz metin sabittir:
+
+```yaml
+idempotency: ["erp-yazma", "{{ run.id }}", "{{ cikar.fatura.fatura_no }}"]
+```
+
+Geçerli referanslar: `run.id`, `node.id`, `tenant.id` ve `<düğüm>.<alan>[.<altalan>]`
+yolları. Derleyici, listede **run'dan run'a değişen** en az bir referans
+(`run.id` ya da bir düğüm çıktısı yolu) bulamazsa `E_STATIK_IDEMPOTENCY` verir.
+
+Bu kural gerçek bir sessiz felaketi kapatıyor: `idempotency: [node_id]` her
+run'da AYNI anahtarı üretir. İkinci run'ın aracı `tool_calls` satırını
+`completed` bulur, dış çağrıyı **hiç yapmaz** ve birinci run'ın yanıtını
+döndürür — yani müşterinin ikinci faturası ERP'ye hiç yazılmaz ve sistem bunu
+başarı olarak raporlar. `{{ }}` işareti ayrıca "bu bir yol mu yoksa sabit mi"
+belirsizliğini ortadan kaldırır ve sabit bir önek yazmayı (teşhis için
+yararlı) mümkün kılar.
 
 ---
 
@@ -159,7 +216,7 @@ graph:
     depends_on: [ozetle]
     tool: test.slow_writer
     inputs: [ozetle.ozet]
-    idempotency: [run_id, node_id]
+    idempotency: ["{{ run.id }}", "{{ node.id }}"]
     compensation: test.slow_writer_geri_al
 """
 
@@ -208,6 +265,8 @@ E_ORTULU_DALLANMA = "E_ORTULU_DALLANMA"    # dallanmayan düğümün 2+ çocuğu
 E_ROTA_DISI_BAGIMLILIK = "E_ROTA_DISI_BAGIMLILIK"  # router'a rota dışından bağımlılık
 # §4.1 şema zorunlulukları
 E_IDEMPOTENCY = "E_IDEMPOTENCY"            # (1) yan etkili araçta idempotency yok
+E_STATIK_IDEMPOTENCY = "E_STATIK_IDEMPOTENCY"  # ZK3: anahtar run'dan run'a değişmiyor
+E_IDEMPOTENCY_IFADESI = "E_IDEMPOTENCY_IFADESI"  # ZK3: ayrıştırılamayan {{ }} ifadesi
 E_TELAFI = "E_TELAFI"                      # (1) telafi yok
 E_KACIS_KAPISI = "E_KACIS_KAPISI"          # (2) router'da kaçış kapısı yok
 E_BEYAN_EDILMEMIS_ALAN = "E_BEYAN_EDILMEMIS_ALAN"  # (3) Kural 3 ihlali
@@ -352,6 +411,15 @@ class ToolNode(NodeBase):
     type: Literal["tool"]
     tool: str
     idempotency: list[str] = []
+    """Yan etkinin evrensel kimliğini üreten parçalar (ZK3).
+
+    Her parça ya düz metin sabittir ya da `{{ ... }}` şablon referansıdır:
+
+        idempotency: ["erp-yazma", "{{ run.id }}", "{{ cikar.fatura.fatura_no }}"]
+
+    Söz dizimi burada serbesttir; ANLAMSAL denetim Görev 3'tedir — listede
+    run'dan run'a değişen en az bir referans bulunmak ZORUNDADIR, aksi halde
+    ikinci run'ın yan etkisi sessizce atlanır (E_STATIK_IDEMPOTENCY)."""
     compensation: str | None = None
     batchable: bool = False          # K10: v1'de yok sayılır, şemada rezerve
     outputs: dict[str, str] = {}
@@ -836,8 +904,18 @@ git commit -m "feat(compiler): profil yükleme ve sır çözümleme (K14)"
 
 Grafın kendisi hakkındaki her denetim burada. Bu görevden sonra spec §4.1'in altı zorunluluğundan dördü ve §4.2'nin yapısal denetimleri mekanik olarak uygulanır.
 
+**ZK1 zorunlu:** döngü tespiti Kahn topolojik sıralamasıyla yapılır — `_topolojik()`
+sıraya alınan düğüm sayısını toplam düğüm sayısıyla karşılaştırır ve azsa `None`
+döner. DFS renklendirmesi ya da derinlik sınırı **kabul edilmez**: aynı sıra
+Görev 5'in tavan maliyet DP'sinde de kullanılacak, iki iddia tek mekanizmayı
+paylaşmalı.
+
+**ZK3 zorunlu:** `idempotency` listesinin anlamsal denetimi (`{{ }}` ayrıştırma +
+"en az bir run-değişken referans") bu görevde `compiler/expr.py` içinde yazılır.
+
 **Dosyalar:**
 - Oluştur: `packages/kernel/compiler/graph.py`
+- Oluştur: `packages/kernel/compiler/expr.py` (ZK3 — `{{ }}` ayrıştırıcı)
 - Oluştur: `packages/kernel/compiler/validate_graph.py`
 - Değiştir: `packages/kernel/tools/registry.py` (`names()`, `reconcile_supported()`)
 - Test: `tests/compiler/test_graph.py`, `tests/compiler/test_validate_graph.py`
@@ -1106,6 +1184,53 @@ def _topolojik(
 Koş: `.venv/bin/python -m pytest tests/compiler/test_graph.py -v`
 Beklenen: 7 PASS
 
+- [ ] **Adım 5b: `expr.py` yaz (ZK3)**
+
+```python
+"""`{{ ... }}` şablon referanslarının ayrıştırıcısı (ZK3).
+
+Derleme zamanı (validate_graph) ve çalışma zamanı (orchestrator/channel) AYNI
+ayrıştırıcıyı kullanır. İki ayrı yorumcu, derleyicinin doğruladığı anahtarla
+çalışma zamanının ürettiği anahtarın sessizce farklılaşması demektir — ve
+idempotency anahtarında bu, çift yan etki demektir.
+"""
+from __future__ import annotations
+
+import re
+
+SABLON = re.compile(r"^\s*\{\{\s*(.+?)\s*\}\}\s*$")
+# Run boyunca sabit kalan, run'dan run'a DEĞİŞMEYEN referanslar.
+SABIT_REFERANSLAR = frozenset({"node.id", "tenant.id"})
+# Run'dan run'a değişen yerleşik referans.
+RUN_REFERANSI = "run.id"
+YOL_DESENI = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$")
+
+
+def parse_part(parca: str) -> str | None:
+    """Düz metin sabit → None. `{{ ref }}` → referans metni.
+
+    Ayrıştırılamayan bir şablon ValueError'dır: `{{ run.id` gibi yarım bir
+    ifade sessizce düz metne dönüşürse anahtar sabitleşir ve ZK3 delinir.
+    """
+    if "{{" in parca or "}}" in parca:
+        m = SABLON.match(parca)
+        if m is None:
+            raise ValueError(f"ayrıştırılamayan idempotency ifadesi: {parca!r}")
+        ref = m.group(1)
+        if ref != RUN_REFERANSI and ref not in SABIT_REFERANSLAR and not YOL_DESENI.match(ref):
+            raise ValueError(
+                f"geçersiz referans: {ref!r};"
+                f" geçerli: run.id, node.id, tenant.id ya da <düğüm>.<alan>"
+            )
+        return ref
+    return None
+
+
+def run_degisken_mi(ref: str) -> bool:
+    """Bu referans run'dan run'a değişir mi? ZK3'ün asıl sorusu budur."""
+    return ref == RUN_REFERANSI or ref not in SABIT_REFERANSLAR
+```
+
 - [ ] **Adım 6: Başarısız doğrulama testlerini yaz**
 
 `tests/compiler/test_validate_graph.py`:
@@ -1127,7 +1252,7 @@ graph:
   - id: oku
     type: tool
     tool: belge.oku
-    idempotency: [run_id, node_id]
+    idempotency: ["{{ run.id }}", "{{ node.id }}"]
     compensation: belge.oku_geri_al
     outputs: {belgeler: BelgeListesi}
   - id: siniflandir
@@ -1169,7 +1294,7 @@ def test_referans_graf_temiz_gecer():
 
 def test_yan_etkili_aracta_idempotency_zorunlu():
     """§4.1(1) — çift yazma koruması konfig seviyesinde."""
-    r = dogrula(REFERANS.replace("    idempotency: [run_id, node_id]\n", ""))
+    r = dogrula(REFERANS.replace('    idempotency: ["{{ run.id }}", "{{ node.id }}"]\\n', ''))
     assert "E_IDEMPOTENCY" in r.codes()
 
 
@@ -1256,6 +1381,33 @@ def test_switch_default_zorunlu():
 )
 def test_case_ifadeleri_ayristirilir(ifade, beklenen):
     assert V.parse_case(ifade) == beklenen
+
+
+def test_statik_idempotency_reddedilir():
+    """ZK3: her run'da aynı anahtar → ikinci run'ın yan etkisi SESSİZCE atlanır."""
+    r = dogrula(REFERANS.replace(
+        'idempotency: ["{{ run.id }}", "{{ node.id }}"]', 'idempotency: ["{{ node.id }}"]'))
+    assert "E_STATIK_IDEMPOTENCY" in r.codes()
+
+
+def test_run_id_iceren_idempotency_gecer():
+    r = dogrula(REFERANS.replace(
+        'idempotency: ["{{ run.id }}", "{{ node.id }}"]', 'idempotency: ["oku", "{{ run.id }}"]'))
+    assert "E_STATIK_IDEMPOTENCY" not in r.codes()
+
+
+def test_dugum_yolu_iceren_idempotency_gecer():
+    r = dogrula(REFERANS.replace(
+        'idempotency: ["{{ run.id }}", "{{ node.id }}"]',
+        'idempotency: ["{{ cikar.fatura.fatura_no }}"]'))
+    assert "E_STATIK_IDEMPOTENCY" not in r.codes()
+
+
+def test_yarim_sablon_ifadesi_reddedilir():
+    """`{{ run.id` sessizce düz metne dönüşürse anahtar sabitleşir."""
+    r = dogrula(REFERANS.replace(
+        'idempotency: ["{{ run.id }}", "{{ node.id }}"]', 'idempotency: ["{{ run.id"]'))
+    assert "E_IDEMPOTENCY_IFADESI" in r.codes()
 
 
 def test_ayristirilamayan_case_reddedilir():
@@ -1416,6 +1568,8 @@ def _arac_denetimi(n, nid: str, ctx: ValidationContext) -> list[CompileError]:
                 node_id=nid,
             )
         )
+    else:
+        out.extend(_idempotency_denetimi(n, nid))
     if not n.compensation:
         out.append(
             CompileError(
@@ -1433,6 +1587,39 @@ def _arac_denetimi(n, nid: str, ctx: ValidationContext) -> list[CompileError]:
                     node_id=nid,
                 )
             )
+    return out
+
+
+def _idempotency_denetimi(n, nid: str) -> list[CompileError]:
+    """ZK3: anahtar run'dan run'a DEĞİŞMEK zorundadır.
+
+    Sabit bir anahtar (`["{{ node.id }}"]` gibi) her run'da aynı `tool_calls`
+    satırını bulur, ikinci run'ın dış çağrısını `completed` sanıp HİÇ YAPMAZ ve
+    birincinin yanıtını döndürür. Müşterinin ikinci faturası ERP'ye yazılmaz ve
+    sistem bunu başarı olarak raporlar.
+    """
+    out: list[CompileError] = []
+    degisken = False
+    for parca in n.idempotency:
+        try:
+            ref = expr.parse_part(parca)
+        except ValueError as exc:
+            out.append(CompileError(code=E_IDEMPOTENCY_IFADESI, message=str(exc), node_id=nid))
+            continue
+        if ref is not None and expr.run_degisken_mi(ref):
+            degisken = True
+    if not out and not degisken:
+        out.append(
+            CompileError(
+                code=E_STATIK_IDEMPOTENCY,
+                message=(
+                    "idempotency anahtarı her run'da aynı değeri üretiyor;"
+                    " en az bir run-değişken referans zorunlu"
+                    ' ("{{ run.id }}" ya da bir düğüm çıktısı yolu) — ZK3'
+                ),
+                node_id=nid,
+            )
+        )
     return out
 
 
@@ -1700,7 +1887,7 @@ graph:
   - id: oku
     type: tool
     tool: belge.oku
-    idempotency: [run_id, node_id]
+    idempotency: ["{{ run.id }}", "{{ node.id }}"]
     compensation: belge.oku_geri_al
     outputs: {belgeler: BelgeListesi}
   - id: cikar
@@ -1713,7 +1900,7 @@ graph:
     depends_on: [cikar]
     tool: erp.post_invoice
     inputs: [cikar.fatura]
-    idempotency: [run_id, cikar.fatura.fatura_no]
+    idempotency: ["{{ run.id }}", "{{ cikar.fatura.fatura_no }}"]
     compensation: erp.void_invoice
 """
 
@@ -1747,7 +1934,7 @@ def test_bilinmeyen_tip_adi_reddedilir():
 
 
 def test_derin_alan_yolu_dogrulanir():
-    """idempotency: [run_id, cikar.fatura.fatura_no] gerçekten var mı?"""
+    """{{ cikar.fatura.fatura_no }} yolu gerçekten var mı?"""
     r = dogrula(AKIS.replace("cikar.fatura.fatura_no", "cikar.fatura.yok_boyle_alan"))
     assert "E_TIP_UYUMSUZ" in r.codes()
 
@@ -1892,7 +2079,16 @@ def _erisim_yollari(n) -> list[str]:
     if n.type == "switch":
         yollar.append(n.on)
     if n.type == "tool":
-        yollar.extend(p for p in n.idempotency if p not in YERLESIK_ANAHTARLAR)
+        # ZK3: yalnız düğüm YOLU olan referanslar tip denetimine girer;
+        # run.id / node.id / tenant.id yerleşiktir, düz metin sabitler ise
+        # hiçbir düğüme bakmaz.
+        for parca in n.idempotency:
+            try:
+                ref = expr.parse_part(parca)
+            except ValueError:
+                continue  # E_IDEMPOTENCY_IFADESI Görev 3'te raporlanıyor
+            if ref is not None and ref not in expr.SABIT_REFERANSLAR and ref != expr.RUN_REFERANSI:
+                yollar.append(ref)
     return yollar
 
 
@@ -2106,7 +2302,7 @@ trigger: {type: http}
 limits: {max_steps: 5, max_usd_per_run: 100.00, max_wallclock: 1h}
 defaults: {model_tier: standard, retry: {attempts: 1}, max_tokens: 1000}
 graph:
-  - {id: oku, type: tool, tool: belge.oku, idempotency: [run_id, node_id],
+  - {id: oku, type: tool, tool: belge.oku, idempotency: ["{{ run.id }}", "{{ node.id }}"],
      compensation: belge.oku_geri_al, outputs: {belgeler: BelgeListesi}}
   - {id: a, type: llm_task, depends_on: [oku], inputs: [oku.belgeler],
      outputs: {fatura: FaturaModeli}}
@@ -2144,7 +2340,7 @@ trigger: {type: http}
 limits: {max_steps: 5, max_usd_per_run: 100.00, max_wallclock: 1h}
 defaults: {retry: {attempts: 1}}
 graph:
-  - {id: oku, type: tool, tool: belge.oku, idempotency: [run_id, node_id],
+  - {id: oku, type: tool, tool: belge.oku, idempotency: ["{{ run.id }}", "{{ node.id }}"],
      compensation: belge.oku_geri_al}
 """
     assert hesapla(metin).total_usd == Decimal("0")
@@ -2737,6 +2933,19 @@ ALTER TABLE runs ADD COLUMN defer_count int NOT NULL DEFAULT 0;
 ALTER TABLE steps ADD COLUMN estimated_usd numeric(12,6);
 ALTER TABLE steps ADD COLUMN estimate_expires_at timestamptz;
 
+-- ZK2: PII maskeleme haritası RAM'de DEĞİL, burada — şifreli ve süreli.
+-- Fernet ile şifrelenir; anahtar yalnız OTOMASYON_PII_KEY ortam değişkeninden
+-- gelir (K14). Şifresiz tutulsaydı bu kolonun kendisi bir PII deposu olurdu.
+--
+-- Bu kolonun `steps`'te olması BİLİNÇLİDİR: `events` ekleme-yalnızdır (Kural 5)
+-- ve oraya yazılan bir harita ASLA silinemezdi. `steps` UPDATE edilebilir,
+-- dolayısıyla temizlenebilir.
+ALTER TABLE steps ADD COLUMN pii_map bytea;
+ALTER TABLE steps ADD COLUMN pii_map_expires_at timestamptz;
+
+CREATE INDEX steps_acik_pii_map ON steps (pii_map_expires_at)
+    WHERE pii_map IS NOT NULL;
+
 CREATE INDEX steps_acik_rezervasyon ON steps (run_id)
     WHERE estimate_expires_at IS NOT NULL;
 CREATE INDEX approvals_bekleyen ON approvals (status, assignee_role)
@@ -2758,7 +2967,8 @@ def test_002_gocu_uygulanir(db):
                 " WHERE table_name = 'steps'"
             ).fetchall()
         }
-        assert {"estimated_usd", "estimate_expires_at"} <= kolonlar
+        assert {"estimated_usd", "estimate_expires_at",
+                "pii_map", "pii_map_expires_at"} <= kolonlar
         tablolar = {
             r[0]
             for r in conn.execute(
@@ -3031,8 +3241,15 @@ git commit -m "fix(gateway): kiralı bütçe rezervasyonu — TOCTOU kapatıldı
 
 M1'in ikinci park edilmiş maddesi. Spec §6.5: *"PII maskeleme tek noktada. Kurumsal veri dışarı çıkmadan maskelenir; KVKK tartışmasında gösterilecek tek nokta ağ geçididir."* İkinci bir yer daha var ve M1'de o da açıktı: **olay kaydı**. Kural 5 gereği `events` satırı asla silinemez — oraya sızan bir TCKN sonsuza kadar orada kalır. Maskeleme bu yüzden iki yüzeyi birden kapatır.
 
+**ZK2 zorunlu:** maskeleme haritası süreç belleğinde tutulamaz. `steps.pii_map`
+kolonuna Fernet ile şifreli ve TTL'li yazılır; taşıma katmanı çağrılmadan ÖNCE
+commit edilir, yanıt çözüldükten sonra `NULL`'lanır, artakalanlar worker
+boştayken süpürülür. Ayrıntılı gerekçe: "Zorunlu Mimari Kurallar" bölümü.
+
 **Dosyalar:**
 - Oluştur: `packages/kernel/gateway/masking.py`
+- Oluştur: `packages/kernel/state/pii_map.py` (ZK2 — şifreli kalıcılık + süpürme)
+- Değiştir: `pyproject.toml` (`cryptography>=43`)
 - Değiştir: `packages/kernel/gateway/gateway.py` (maskele → gönder → maskeyi çöz)
 - Değiştir: `packages/kernel/orchestrator/step.py` (`error_payload` olay kaydına maskeli yazar)
 - Değiştir: `packages/kernel/orchestrator/runner.py` (profil → varsayılan maskeleyici)
@@ -3170,9 +3387,13 @@ VARSAYILAN_DESENLER = ("eposta", "iban", "tckn", "vkn", "telefon")
 
 
 class MaskSession:
-    """Tek bir LLM çağrısı boyunca yaşayan maskeleme oturumu.
+    """Tek bir LLM çağrısının maskeleme oturumu.
 
-    Harita süreç belleğinde kalır; diske, veritabanına ya da ağa hiç yazılmaz.
+    Harita SÜREÇTE KALMAZ (ZK2): `to_payload()` ile dışa verilir ve
+    `state.pii_map` tarafından şifrelenip `steps.pii_map` kolonuna yazılır.
+    Çağrının ortasında ölen bir worker'ın haritası böylece kaybolmaz —
+    RAM'de tutulsaydı, kaydedilmiş maskeli bir yanıt kalıcı olarak
+    çözülemez hâle gelirdi.
     """
 
     def __init__(self, desenler: list[tuple[str, re.Pattern[str]]]):
@@ -3190,6 +3411,18 @@ class MaskSession:
         for yer_tutucu, gercek in self._harita.items():
             text = text.replace(yer_tutucu, gercek)
         return text
+
+    def to_payload(self) -> dict[str, str]:
+        """Kalıcılaştırılacak harita. ASLA olay kaydına yazılmaz (Kural 5)."""
+        return dict(self._harita)
+
+    @classmethod
+    def from_payload(cls, harita: dict[str, str]) -> MaskSession:
+        """Kaydedilmiş haritayla yalnız maskeyi ÇÖZMEK için kurulur."""
+        s = cls([])
+        s._harita = dict(harita)
+        s._ters = {v: k for k, v in harita.items()}
+        return s
 
     def _yer_tutucu(self, ad: str, deger: str) -> str:
         if deger in self._ters:
@@ -3250,6 +3483,93 @@ def from_policy(enabled: bool, patterns: list[str]) -> Masker:
 Koş: `.venv/bin/python -m pytest tests/gateway/test_masking.py -v`
 Beklenen: 8 PASS
 
+- [ ] **Adım 4b: `state/pii_map.py` yaz (ZK2)**
+
+`pyproject.toml` bağımlılıklarına `"cryptography>=43"` ekle, sonra:
+
+```python
+"""Maskeleme haritasının şifreli, süreli kalıcılığı (ZK2).
+
+Harita `steps.pii_map` kolonunda Fernet ile şifreli durur. Anahtar YALNIZ
+OTOMASYON_PII_KEY ortam değişkeninden gelir (K14).
+
+Kolonun `steps`'te olması bilinçlidir: `events` ekleme-yalnızdır (Kural 5),
+oraya yazılan bir harita asla silinemezdi. `steps` UPDATE edilebilir olduğu
+için TTL'li temizlik mümkündür — bu kolonun kalıcı bir PII arşivine
+dönüşmemesinin tek güvencesi budur.
+"""
+from __future__ import annotations
+
+import json
+import os
+from uuid import UUID
+
+import psycopg
+from cryptography.fernet import Fernet
+
+# Harita iş kirasından uzun yaşar (devralan worker kaydedilmiş yanıtı
+# çözebilsin) ama sonsuz değildir (kolon PII arşivine dönüşmesin).
+TTL_SECONDS = int(os.environ.get("OTOMASYON_PII_MAP_TTL", "3600"))
+
+
+def _fernet() -> Fernet:
+    anahtar = os.environ.get("OTOMASYON_PII_KEY")
+    if not anahtar:
+        raise RuntimeError(
+            "OTOMASYON_PII_KEY tanımlı değil; PII haritası şifresiz yazılamaz (ZK2)"
+        )
+    return Fernet(anahtar.encode("utf-8"))
+
+
+def save(conn: psycopg.Connection, step_id: UUID, harita: dict[str, str]) -> None:
+    """Taşıma katmanı çağrılmadan ÖNCE commit edilir.
+
+    Sıra bağlayıcıdır: sonra yazılsaydı, çağrının ortasında ölen worker'ın
+    maskeli yanıtı bir daha çözülemezdi.
+    """
+    if not harita:
+        return
+    conn.execute(
+        "UPDATE steps SET pii_map = %s,"
+        " pii_map_expires_at = now() + make_interval(secs => %s) WHERE id = %s",
+        (
+            _fernet().encrypt(json.dumps(harita, ensure_ascii=False).encode("utf-8")),
+            TTL_SECONDS,
+            step_id,
+        ),
+    )
+
+
+def load(conn: psycopg.Connection, step_id: UUID) -> dict[str, str]:
+    row = conn.execute(
+        "SELECT pii_map FROM steps WHERE id = %s AND pii_map_expires_at > now()",
+        (step_id,),
+    ).fetchone()
+    if row is None or row[0] is None:
+        return {}
+    return json.loads(_fernet().decrypt(bytes(row[0])).decode("utf-8"))
+
+
+def clear(conn: psycopg.Connection, step_id: UUID) -> None:
+    conn.execute(
+        "UPDATE steps SET pii_map = NULL, pii_map_expires_at = NULL WHERE id = %s",
+        (step_id,),
+    )
+
+
+def sweep(conn: psycopg.Connection) -> int:
+    """Süresi dolmuş haritaları siler. Worker BOŞTAYKEN çağrılır — ayrı bir
+    temizlik süreci yok (K3: cron da bir bağımlılıktır)."""
+    cur = conn.execute(
+        "UPDATE steps SET pii_map = NULL, pii_map_expires_at = NULL"
+        " WHERE pii_map IS NOT NULL AND pii_map_expires_at <= now()"
+    )
+    return cur.rowcount
+```
+
+`runner.run_forever` içinde iş bulunamadığında, uyumadan önce
+`pii_map.sweep()` çağrılır.
+
 - [ ] **Adım 5: Ağ geçidine bağla**
 
 `gateway.py`:
@@ -3264,17 +3584,25 @@ Beklenen: 8 PASS
         self._reserve_budget(model, req, run_id, step_id)
 
         # PII sınırı: bu noktadan SONRA hiçbir ham kurumsal veri süreçten
-        # çıkmaz. Maskeleme oturumu yalnız bu çağrı boyunca yaşar (§6.5).
+        # çıkmaz (§6.5).
         oturum = (self._masker or masking.default_masker()).session()
+        maskeli = {
+            "system_layer1": oturum.mask(req.system_layer1),
+            "system_layer2": oturum.mask(req.system_layer2),
+            "user_content": oturum.mask(req.user_content),
+        }
+        # ZK2: harita çağrıdan ÖNCE kalıcılaşır. Bu sıra bağlayıcıdır.
+        with db.tx() as conn:
+            pii_map.save(conn, step_id, oturum.to_payload())
+
         raw = self._transport.send(
-            model=model,
-            effort=effort,
-            system_layer1=oturum.mask(req.system_layer1),
-            system_layer2=oturum.mask(req.system_layer2),
-            user_content=oturum.mask(req.user_content),
-            max_tokens=req.max_tokens,
+            model=model, effort=effort, max_tokens=req.max_tokens, **maskeli
         )
         raw = raw.model_copy(update={"text": oturum.unmask(raw.text)})
+
+        # Maskesi çözülen yanıt elimizde: harita artık gereksiz, silinir.
+        with db.tx() as conn:
+            pii_map.clear(conn, step_id)
         ...
 ```
 
@@ -3330,6 +3658,47 @@ def test_yanit_maskesi_cozulmus_doner(kayit_eden_gateway):
     ...
 
 
+def test_harita_CAGRIDAN_ONCE_commit_edilir(db, adim_id, olen_gateway):
+    """ZK2: taşıma katmanı patlarsa bile harita veritabanında olmalı."""
+    from kernel.state import pii_map
+    with pytest.raises(RuntimeError):
+        olen_gateway.complete(istek_tckn(), run_id, adim_id)
+    with db.tx() as conn:
+        ham = conn.execute(
+            "SELECT pii_map FROM steps WHERE id = %s", (adim_id,)
+        ).fetchone()[0]
+        assert ham is not None, "harita çağrıdan ÖNCE yazılmalıydı"
+        assert TCKN.encode() not in bytes(ham), "kolon düz metin PII taşıyor"
+        assert pii_map.load(conn, adim_id) == {"[TCKN_1]": TCKN}
+
+
+def test_basarili_cagrida_harita_silinir(db, adim_id, kayit_eden_gateway):
+    gw, _ = kayit_eden_gateway
+    gw.complete(istek_tckn(), run_id, adim_id)
+    with db.tx() as conn:
+        assert conn.execute(
+            "SELECT pii_map FROM steps WHERE id = %s", (adim_id,)
+        ).fetchone()[0] is None
+
+
+def test_suresi_dolmus_harita_supurulur(db, adim_id):
+    from kernel.state import pii_map
+    with db.tx() as conn:
+        pii_map.save(conn, adim_id, {"[TCKN_1]": TCKN})
+        conn.execute("UPDATE steps SET pii_map_expires_at = now() -"
+                     " interval '1 s' WHERE id = %s", (adim_id,))
+        assert pii_map.sweep(conn) == 1
+        assert pii_map.load(conn, adim_id) == {}
+
+
+def test_anahtar_yoksa_PATLAR(db, adim_id, monkeypatch):
+    """Sessizce şifresiz yazmaktansa çalışmamak (K14 felsefesi)."""
+    from kernel.state import pii_map
+    monkeypatch.delenv("OTOMASYON_PII_KEY", raising=False)
+    with db.tx() as conn, pytest.raises(RuntimeError, match="OTOMASYON_PII_KEY"):
+        pii_map.save(conn, adim_id, {"[TCKN_1]": TCKN})
+
+
 def test_olay_kaydinda_ham_PII_yok(db, run_id):
     """Kural 5: bu satır asla silinemez."""
     from kernel.orchestrator import step
@@ -3376,7 +3745,7 @@ M1'in `flow.py`'sindeki sabit iki düğümlü akış siliniyor. Orkestratör art
 ```python
 """...
 Idempotency anahtarı ARAÇTAN gelmez, KONFİGDEN gelir (KK4): YAML'daki
-`idempotency: [run_id, cikar.fatura.fatura_no]` listesi derleme anında
+`idempotency: ["{{ run.id }}", "{{ cikar.fatura.fatura_no }}"]` listesi derleme anında
 doğrulanır ve çalışma zamanında çözülür. Anahtar araç kodunda gizliyken
 derleyici §4.1(1)'i uygulayamıyordu.
 """
@@ -3501,14 +3870,19 @@ def idempotency_key(run_id: UUID, node, tenant_id: str = "") -> str:
     """
     parcalar: list[str] = []
     for p in node.idempotency:
-        if p == "run_id":
+        # ZK3: derleyiciyle AYNI ayrıştırıcı. İki ayrı yorumcu, doğrulanan
+        # anahtarla üretilen anahtarın sessizce farklılaşması demektir.
+        ref = expr.parse_part(p)
+        if ref is None:
+            parcalar.append(p)                       # düz metin sabit
+        elif ref == "run.id":
             parcalar.append(str(run_id))
-        elif p == "node_id":
+        elif ref == "node.id":
             parcalar.append(node.id)
-        elif p == "tenant_id":
+        elif ref == "tenant.id":
             parcalar.append(tenant_id)
         else:
-            parcalar.append(str(resolve_path(run_id, p)))
+            parcalar.append(str(resolve_path(run_id, ref)))
     ham = "|".join(parcalar)
     # Anahtar hem okunabilir hem sınırlı uzunlukta olmalı: teşhis için düğüm
     # adı önde, çarpışma güvencesi için sonda hash.
@@ -4134,7 +4508,7 @@ graph:
   - id: oku
     type: tool
     tool: belge.oku
-    idempotency: [run_id, node_id]
+    idempotency: ["belge-oku", "{{ run.id }}"]   # ZK3: run-değişken zorunlu
     compensation: belge.oku_geri_al
     outputs: {belgeler: BelgeListesi}
 
@@ -4177,7 +4551,7 @@ graph:
     depends_on: [dogrula, onay_al]
     tool: erp.post_invoice
     inputs: [cikar.fatura]
-    idempotency: [run_id, cikar.fatura.fatura_no]
+    idempotency: ["{{ run.id }}", "{{ cikar.fatura.fatura_no }}"]
     compensation: erp.void_invoice
     batchable: false            # K10: v1'de yok sayılır
     outputs: {sonuc: YazmaSonucu}
@@ -4213,6 +4587,7 @@ alanı bozulmuş** kopyası olacak biçimde:
 | `butce_asimi.yaml` | `max_usd_per_run: 0.001` | `E_BUTCE_TAVANI` |
 | `adim_asimi.yaml` | `max_steps: 2` | `E_ADIM_TAVANI` |
 | `bilinmeyen_arac.yaml` | `tool: erp.hayalet` | `E_BILINMEYEN_ARAC` |
+| `statik_idempotency.yaml` | `idempotency: ["{{ node.id }}"]` | `E_STATIK_IDEMPOTENCY` |
 
 Bozuk profil gerektiren vaka (`duz_metin_sir`) için `bozuk/profile_sirli.yaml`
 ayrıca yazılır. `gomulu_icerik.yaml` için `bozuk/types_gomulu.py` **test
@@ -4302,6 +4677,7 @@ VAKALAR = [
     ("butce_asimi.yaml", "E_BUTCE_TAVANI"),
     ("adim_asimi.yaml", "E_ADIM_TAVANI"),
     ("bilinmeyen_arac.yaml", "E_BILINMEYEN_ARAC"),
+    ("statik_idempotency.yaml", "E_STATIK_IDEMPOTENCY"),
 ]
 
 
